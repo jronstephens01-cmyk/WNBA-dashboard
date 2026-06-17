@@ -566,6 +566,8 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
     </div>
   </div>
 
+  <div id="pick-of-day-card"></div>
+
   <div class="props-grid" id="props-container"></div>
 
   <!-- Custom lookup (collapsed by default) -->
@@ -2149,6 +2151,7 @@ async function loadTodaysProps() {
   // Show a clear status banner if we tried to fetch odds and something went wrong
   showOddsStatusBanner();
 
+  renderPickOfTheDay();
   renderTodaysProps();
   snapshotPropsForHistory(); // auto-log every prop offered today, locked or not
 }
@@ -2176,6 +2179,80 @@ function showOddsStatusBanner() {
 
 function showProxyHelp() {
   showAppAlert('WHY THIS HAPPENS:\n\nSportsbook odds APIs block direct browser requests for security (CORS). They expect to be called from a server.\n\nTHE FIX (free, ~5 min, no credit card):\n\n1. Go to workers.cloudflare.com and sign up (free)\n2. Click "Create" → "Start with Hello World" → name it anything\n3. Delete the sample code in the editor, paste in the worker.js file provided with this dashboard\n4. Click "Deploy" — you\'ll get a URL like https://yourname.workers.dev\n5. Come back here, open this odds panel, paste that URL into "Proxy URL", and Save\n\nOnce saved, every odds request automatically routes through your proxy and the CORS block goes away.', 'Setting Up Your Free Proxy');
+}
+
+// "Pick of the Day" — the single highest-confidence OVER/UNDER recommendation
+// across every player and every stat (points/rebounds/assists) for whatever
+// date is currently loaded in the Player Props tab. This is NOT the same as
+// "best plays only" (which can show several props at once) — this picks
+// exactly one, ranked purely by the model's own confidence score, since
+// that's what a single-bet ladder/parlay-doubling challenge needs: one
+// pick, not a list. Odds aren't part of the ranking here on purpose — a
+// real sportsbook line might price this prop far from even money, which
+// matters a lot for that kind of challenge, so the card always shows
+// whatever odds are available (real or estimated) and flags clearly which
+// one it is, rather than silently picking a "safer-priced" but lower
+// confidence prop instead.
+function getPickOfTheDay() {
+  let rows = [];
+  for (const p of allTodaysProps) {
+    if (p.pts && p.pts.rec !== 'PASS') rows.push({ ...p, stat:'pts', statName:'Points', d:p.pts });
+    if (p.reb && p.reb.rec !== 'PASS') rows.push({ ...p, stat:'reb', statName:'Rebounds', d:p.reb });
+    if (p.ast && p.ast.rec !== 'PASS') rows.push({ ...p, stat:'ast', statName:'Assists', d:p.ast });
+  }
+  if (!rows.length) return null;
+  rows.sort((a,b) => b.d.conf - a.d.conf);
+  return rows[0];
+}
+
+// American odds -> approximate win probability the market is pricing in,
+// just for a quick "how close to even-money is this" readout on the card.
+function americanOddsToImpliedProb(odds) {
+  if (odds == null) return null;
+  const o = Number(odds);
+  if (Number.isNaN(o)) return null;
+  return o > 0 ? 100 / (o + 100) : (-o) / (-o + 100);
+}
+
+function renderPickOfTheDay() {
+  const el = document.getElementById('pick-of-day-card');
+  if (!el) return;
+  const pick = getPickOfTheDay();
+  if (!pick) { el.innerHTML = ''; return; }
+
+  const d = pick.d;
+  const color = TEAM_COLORS[pick.team] || '#555';
+  const recColor = d.rec === 'OVER' ? 'var(--green)' : 'var(--accent)';
+  const oddsForSide = d.rec === 'OVER' ? d.over : d.under;
+  const hasRealOdds = !!d.real && oddsForSide != null;
+  const oddsLabel = hasRealOdds
+    ? (oddsForSide > 0 ? '+' + oddsForSide : oddsForSide) + (d.book ? ' (' + d.book + ')' : '')
+    : 'No real line yet — model estimate only';
+  const impliedProb = hasRealOdds ? americanOddsToImpliedProb(oddsForSide) : null;
+
+  el.innerHTML = `
+    <div class="card" style="padding:20px 24px;margin-bottom:16px;border-left:3px solid var(--gold);background:linear-gradient(135deg, rgba(232,160,32,.08), transparent)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <span style="font-size:18px">⭐</span>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--gold)">Pick of the Day</div>
+        <span style="font-size:11px;color:var(--muted);margin-left:auto">Highest model confidence, every player & stat</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
+        <span style="font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:var(--text)">${pick.player}</span>
+        <span style="font-size:12px;color:var(--muted)">${pick.team} vs ${pick.opp}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:10px">
+        <div style="font-size:22px;font-weight:800;color:${recColor}">${d.rec} ${d.line} ${pick.statName}</div>
+        <div style="font-size:12px;color:var(--muted)">Model proj: <strong style="color:var(--text)">${d.proj}</strong> · Edge: <strong style="color:var(--text)">${d.edge>0?'+':''}${d.edge}</strong> · Confidence: <strong style="color:${d.conf>=7?'var(--green)':'var(--gold)'}">${d.conf}/10</strong></div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#2a2a34);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:700;color:${hasRealOdds?'var(--text)':'var(--muted)'}">${hasRealOdds?'🟢':'⚪'} Odds: ${oddsLabel}</span>
+        ${impliedProb!=null ? `<span style="font-size:11px;color:var(--muted)">(~${(impliedProb*100).toFixed(0)}% implied)</span>` : ''}
+      </div>
+      ${!hasRealOdds ? `<p style="font-size:11px;color:var(--muted);margin-top:8px">Connect a live odds source (Settings → Odds) to see this prop's real sportsbook price instead of an estimate.</p>` : ''}
+    </div>
+  `;
 }
 
 function renderTodaysProps() {
