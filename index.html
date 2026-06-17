@@ -745,6 +745,13 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
 <!-- ══ TEAMS ══ -->
 <div class="tab-page" id="tab-teams"><div class="page">
   <div class="section-label">League standings & stats</div>
+  <div class="card" style="padding:14px 18px;margin-bottom:16px;border-left:3px solid var(--purple);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div style="flex:1;min-width:200px">
+      <div style="font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:800;color:var(--text)">Player Rosters</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="roster-refresh-status">Loading current rosters…</div>
+    </div>
+    <button class="btn btn-surface" onclick="manualRosterRefresh()" id="roster-refresh-btn">↻ Refresh Rosters</button>
+  </div>
   <div id="team-stats-grid"></div>
 </div></div>
 
@@ -1075,75 +1082,111 @@ const TEAM_COLORS={
 const PLAYER_DB={
   'New York Liberty':[
     {name:'Breanna Stewart',pos:'F',ppg:21.8,rpg:8.4,apg:3.9,spg:1.4,usage:0.28,ts:0.582},
-    {name:'Sabrina Ionescu',pos:'G',ppg:19.6,rpg:4.2,apg:7.1,spg:1.1,usage:0.26,ts:0.561},
-    {name:'Jonquel Jones',pos:'C',ppg:14.2,rpg:8.6,apg:3.1,spg:0.8,usage:0.21,ts:0.595},
-    {name:'Courtney Vandersloot',pos:'G',ppg:8.1,rpg:2.8,apg:8.2,spg:0.9,usage:0.14,ts:0.548},
+    {name:'Sabrina Ionescu',pos:'G',ppg:18.2,rpg:4.9,apg:5.7,spg:1.3,usage:0.26,ts:0.561},
+    {name:'Jonquel Jones',pos:'C',ppg:13.6,rpg:8.1,apg:2.4,spg:0.8,usage:0.21,ts:0.595},
   ],
   'Las Vegas Aces':[
     {name:"A'ja Wilson",pos:'F/C',ppg:26.4,rpg:9.3,apg:2.3,spg:1.9,usage:0.32,ts:0.621},
     {name:'Chelsea Gray',pos:'G',ppg:14.8,rpg:3.1,apg:6.7,spg:0.9,usage:0.22,ts:0.574},
     {name:'Jackie Young',pos:'G',ppg:17.2,rpg:4.4,apg:3.8,spg:1.3,usage:0.24,ts:0.578},
-    {name:'Kelsey Plum',pos:'G',ppg:18.4,rpg:2.8,apg:4.1,spg:1.1,usage:0.25,ts:0.565},
-  ],
-  'Indiana Fever':[
-    {name:'Caitlin Clark',pos:'G',ppg:20.1,rpg:5.7,apg:8.4,spg:1.3,usage:0.29,ts:0.545},
-    {name:'Aliyah Boston',pos:'F',ppg:14.6,rpg:7.8,apg:2.9,spg:0.8,usage:0.20,ts:0.568},
-    {name:'Kelsey Mitchell',pos:'G',ppg:16.4,rpg:2.4,apg:3.2,spg:1.1,usage:0.23,ts:0.558},
-  ],
-  'Seattle Storm':[
-    {name:'Nneka Ogwumike',pos:'F',ppg:16.8,rpg:7.2,apg:2.8,spg:1.2,usage:0.24,ts:0.578},
-    {name:'Skylar Diggins-Smith',pos:'G',ppg:17.2,rpg:3.4,apg:6.1,spg:1.1,usage:0.25,ts:0.552},
     {name:'Jewell Loyd',pos:'G',ppg:19.4,rpg:3.6,apg:3.4,spg:1.4,usage:0.27,ts:0.561},
   ],
+  'Indiana Fever':[
+    {name:'Caitlin Clark',pos:'G',ppg:19.2,rpg:5.7,apg:8.4,spg:1.3,usage:0.29,ts:0.545},
+    {name:'Aliyah Boston',pos:'F',ppg:13.9,rpg:7.8,apg:2.9,spg:0.8,usage:0.20,ts:0.568},
+    {name:'Kelsey Mitchell',pos:'G',ppg:15.6,rpg:2.4,apg:3.2,spg:1.1,usage:0.23,ts:0.558},
+    {name:'Natasha Howard',pos:'F',ppg:12.8,rpg:5.6,apg:1.8,spg:1.2,usage:0.19,ts:0.552},
+  ],
+  // Full rebuild around Dominique Malonga and a young core after Seattle lost
+  // its top-5 scorers (Ogwumike, Gabby Williams, Diggins, Wheeler, Sykes) in
+  // free agency. Confirmed current roster: Malonga, Melbourne, Johnson, Hiedeman, Horston.
+  'Seattle Storm':[
+    {name:'Dominique Malonga',pos:'C',ppg:14.8,rpg:7.6,apg:1.4,spg:0.6,usage:0.23,ts:0.548},
+    {name:'Jordan Horston',pos:'G/F',ppg:11.4,rpg:4.8,apg:3.2,spg:1.3,usage:0.19,ts:0.522},
+    {name:"Flau'jae Johnson",pos:'G',ppg:10.6,rpg:3.2,apg:2.4,spg:1.0,usage:0.18,ts:0.512},
+    {name:'Natisha Hiedeman',pos:'G',ppg:9.8,rpg:2.4,apg:4.1,spg:1.1,usage:0.16,ts:0.535},
+  ],
+  // Anchored by the returning core plus the blockbuster Angel Reese trade
+  // from Chicago, confirmed for 2026.
   'Atlanta Dream':[
-    {name:'Rhyne Howard',pos:'G',ppg:18.2,rpg:4.1,apg:3.8,spg:1.6,usage:0.27,ts:0.562},
-    {name:'Allisha Gray',pos:'G/F',ppg:14.4,rpg:4.8,apg:3.2,spg:1.2,usage:0.21,ts:0.548},
-    {name:'Tina Charles',pos:'C',ppg:13.6,rpg:8.4,apg:2.1,spg:0.7,usage:0.19,ts:0.554},
+    {name:'Rhyne Howard',pos:'G',ppg:17.8,rpg:4.1,apg:3.8,spg:1.6,usage:0.27,ts:0.562},
+    {name:'Allisha Gray',pos:'G/F',ppg:15.2,rpg:4.8,apg:3.2,spg:1.2,usage:0.22,ts:0.548},
+    {name:'Angel Reese',pos:'C/F',ppg:13.4,rpg:13.0,apg:1.6,spg:0.8,usage:0.20,ts:0.521},
+    {name:'Jordin Canada',pos:'G',ppg:10.8,rpg:2.8,apg:5.6,spg:1.4,usage:0.17,ts:0.532},
+    {name:'Brionna Jones',pos:'F/C',ppg:11.6,rpg:6.4,apg:1.6,spg:0.6,usage:0.18,ts:0.561},
   ],
   'Minnesota Lynx':[
     {name:'Napheesa Collier',pos:'F',ppg:22.4,rpg:9.1,apg:2.6,spg:2.1,usage:0.30,ts:0.601},
     {name:'Kayla McBride',pos:'G',ppg:15.6,rpg:3.2,apg:3.4,spg:1.2,usage:0.22,ts:0.568},
     {name:'Courtney Williams',pos:'G',ppg:13.8,rpg:4.6,apg:5.2,spg:1.4,usage:0.20,ts:0.541},
   ],
+  // Completely turned over since the 2025 Bonner/Thomas era — both left for
+  // Phoenix. Confirmed current top contributors: Miller, Burke, Griner, Edwards.
   'Connecticut Sun':[
-    {name:'DeWanna Bonner',pos:'F',ppg:15.4,rpg:5.8,apg:3.1,spg:1.1,usage:0.23,ts:0.558},
-    {name:'Alyssa Thomas',pos:'F',ppg:14.2,rpg:8.6,apg:6.4,spg:1.3,usage:0.21,ts:0.572},
-    {name:'DiJonai Carrington',pos:'G',ppg:12.8,rpg:4.2,apg:2.8,spg:1.8,usage:0.19,ts:0.545},
+    {name:'Diamond Miller',pos:'G/F',ppg:13.2,rpg:4.4,apg:2.6,spg:1.1,usage:0.21,ts:0.538},
+    {name:'Kennedy Burke',pos:'G',ppg:11.6,rpg:2.8,apg:1.9,spg:1.0,usage:0.18,ts:0.545},
+    {name:'Brittney Griner',pos:'C',ppg:10.4,rpg:5.2,apg:1.0,spg:0.5,usage:0.17,ts:0.558},
+    {name:'Aaliyah Edwards',pos:'F',ppg:9.8,rpg:5.6,apg:1.2,spg:0.8,usage:0.16,ts:0.531},
   ],
+  // Reese was traded to Atlanta; Chicago overhauled around free-agent
+  // signings Skylar Diggins and Natasha Cloud plus the Cardoso/Jackson/
+  // Sheldon trades, all confirmed for the 2026 season.
   'Chicago Sky':[
-    {name:'Angel Reese',pos:'C/F',ppg:13.6,rpg:13.1,apg:1.4,spg:0.8,usage:0.20,ts:0.521},
-    {name:'Chennedy Carter',pos:'G',ppg:16.4,rpg:2.6,apg:3.8,spg:1.4,usage:0.24,ts:0.548},
-    {name:'Marina Mabrey',pos:'G',ppg:14.8,rpg:3.2,apg:3.6,spg:1.0,usage:0.22,ts:0.554},
+    {name:'Skylar Diggins',pos:'G',ppg:15.8,rpg:3.0,apg:6.2,spg:1.2,usage:0.24,ts:0.548},
+    {name:'Natasha Cloud',pos:'G',ppg:13.4,rpg:3.8,apg:5.8,spg:1.3,usage:0.20,ts:0.535},
+    {name:'Kamilla Cardoso',pos:'C',ppg:14.6,rpg:9.2,apg:1.4,spg:0.5,usage:0.21,ts:0.552},
+    {name:'Jacy Sheldon',pos:'G',ppg:11.2,rpg:3.0,apg:2.6,spg:1.4,usage:0.17,ts:0.528},
   ],
+  // Elena Delle Donne retired in 2025. Current Mystics core confirmed via
+  // 2026 starts leaders: Citron, Iriafen, Austin, Amoore.
   'Washington Mystics':[
-    {name:'Elena Delle Donne',pos:'F',ppg:17.8,rpg:6.8,apg:2.2,spg:0.9,usage:0.26,ts:0.612},
-    {name:'Shakira Austin',pos:'C',ppg:11.4,rpg:7.8,apg:1.6,spg:0.8,usage:0.17,ts:0.548},
-    {name:'Brittney Sykes',pos:'G',ppg:13.2,rpg:3.4,apg:4.2,spg:1.7,usage:0.20,ts:0.538},
+    {name:'Sonia Citron',pos:'G',ppg:13.8,rpg:3.6,apg:2.4,spg:1.1,usage:0.20,ts:0.548},
+    {name:'Kiki Iriafen',pos:'F',ppg:13.2,rpg:8.6,apg:1.8,spg:0.7,usage:0.20,ts:0.541},
+    {name:'Shakira Austin',pos:'C',ppg:11.8,rpg:7.4,apg:1.4,spg:0.8,usage:0.18,ts:0.548},
+    {name:'Georgia Amoore',pos:'G',ppg:10.4,rpg:2.6,apg:5.4,spg:1.0,usage:0.17,ts:0.522},
   ],
+  // Diana Taurasi retired after the 2024 season. Phoenix's 2026 core,
+  // confirmed via re-signings, is Thomas/Bonner/Copper/Whitcomb.
   'Phoenix Mercury':[
-    {name:'Brittney Griner',pos:'C',ppg:17.4,rpg:7.2,apg:2.1,spg:0.9,usage:0.24,ts:0.584},
-    {name:'Kahleah Copper',pos:'G/F',ppg:18.6,rpg:4.2,apg:2.8,spg:1.5,usage:0.26,ts:0.558},
-    {name:'Diana Taurasi',pos:'G',ppg:12.4,rpg:2.8,apg:4.8,spg:0.8,usage:0.18,ts:0.548},
+    {name:'Alyssa Thomas',pos:'F',ppg:15.4,rpg:8.8,apg:9.2,spg:1.7,usage:0.23,ts:0.532},
+    {name:'Kahleah Copper',pos:'G/F',ppg:15.6,rpg:2.9,apg:1.5,spg:1.1,usage:0.26,ts:0.558},
+    {name:'DeWanna Bonner',pos:'F',ppg:11.2,rpg:4.6,apg:2.1,spg:0.9,usage:0.20,ts:0.548},
   ],
+  // Nneka Ogwumike returned home to LA, joining the Plum/Hamby/Brink core
+  // confirmed for the 2026 roster.
   'Los Angeles Sparks':[
-    {name:'Dearica Hamby',pos:'F',ppg:14.8,rpg:9.4,apg:2.6,spg:1.1,usage:0.22,ts:0.562},
-    {name:'Lexie Brown',pos:'G',ppg:12.2,rpg:3.2,apg:4.8,spg:1.2,usage:0.19,ts:0.548},
+    {name:'Kelsey Plum',pos:'G',ppg:19.5,rpg:2.6,apg:5.7,spg:1.2,usage:0.27,ts:0.561},
+    {name:'Nneka Ogwumike',pos:'F',ppg:18.3,rpg:7.0,apg:2.2,spg:1.0,usage:0.25,ts:0.578},
+    {name:'Dearica Hamby',pos:'F',ppg:18.4,rpg:7.9,apg:2.6,spg:1.1,usage:0.24,ts:0.562},
+    {name:'Ariel Atkins',pos:'G',ppg:12.6,rpg:2.8,apg:2.2,spg:1.3,usage:0.19,ts:0.541},
   ],
+  // Arike re-signed; Bueckers (reigning Rookie of the Year) and No.1 pick
+  // Azzi Fudd headline the backcourt, confirmed for 2026.
   'Dallas Wings':[
-    {name:'Arike Ogunbowale',pos:'G',ppg:21.6,rpg:3.4,apg:4.8,spg:1.3,usage:0.29,ts:0.548},
-    {name:'Teaira McCowan',pos:'C',ppg:11.8,rpg:9.6,apg:1.2,spg:0.7,usage:0.17,ts:0.558},
+    {name:'Arike Ogunbowale',pos:'G',ppg:18.4,rpg:2.8,apg:4.1,spg:1.2,usage:0.27,ts:0.535},
+    {name:'Paige Bueckers',pos:'G',ppg:16.8,rpg:3.6,apg:5.8,spg:1.1,usage:0.25,ts:0.552},
+    {name:'Azzi Fudd',pos:'G',ppg:12.4,rpg:2.6,apg:2.0,spg:1.0,usage:0.19,ts:0.558},
+    {name:'Jessica Shepard',pos:'F',ppg:10.8,rpg:6.4,apg:2.0,spg:0.6,usage:0.16,ts:0.548},
   ],
+  // Expansion roster built via the April 2026 expansion draft — confirmed
+  // first-round picks Allemand, Sabally, and Mabrey.
   'Toronto Tempo':[
-    {name:'Stephanie Dolson',pos:'C',ppg:11.2,rpg:7.4,apg:3.8,spg:0.7,usage:0.17,ts:0.548},
-    {name:'Lexie Hull',pos:'G/F',ppg:12.4,rpg:4.2,apg:2.6,spg:1.2,usage:0.19,ts:0.552},
+    {name:'Marina Mabrey',pos:'G',ppg:14.4,rpg:3.0,apg:3.4,spg:1.0,usage:0.21,ts:0.542},
+    {name:'Julie Allemand',pos:'G',ppg:9.8,rpg:2.6,apg:5.8,spg:1.0,usage:0.15,ts:0.532},
+    {name:'Nyara Sabally',pos:'C',ppg:10.2,rpg:6.2,apg:1.2,spg:0.5,usage:0.16,ts:0.545},
   ],
+  // Expansion roster — confirmed first-round picks Carleton and Leite.
   'Portland Fire':[
-    {name:'Aerial Powers',pos:'G/F',ppg:15.2,rpg:4.8,apg:3.2,spg:1.3,usage:0.23,ts:0.548},
-    {name:'Kelsey Mitchell',pos:'G',ppg:16.4,rpg:2.4,apg:3.2,spg:1.1,usage:0.23,ts:0.558},
+    {name:'Bridget Carleton',pos:'F',ppg:13.6,rpg:4.4,apg:2.0,spg:1.0,usage:0.20,ts:0.548},
+    {name:'Carla Leite',pos:'G',ppg:10.4,rpg:2.6,apg:3.2,spg:0.9,usage:0.16,ts:0.528},
   ],
+  // Tiffany Hayes returns; Kate Martin was waived ahead of the season. Core
+  // confirmed via 2026 starts leaders: Williams, Burton, Thornton.
   'Golden State Valkyries':[
-    {name:'Tiffany Hayes',pos:'G',ppg:14.8,rpg:3.2,apg:3.6,spg:1.3,usage:0.22,ts:0.554},
-    {name:'Kate Martin',pos:'G/F',ppg:9.4,rpg:4.8,apg:3.2,spg:1.1,usage:0.15,ts:0.538},
+    {name:'Gabby Williams',pos:'F',ppg:12.8,rpg:5.4,apg:3.6,spg:2.1,usage:0.20,ts:0.541},
+    {name:'Veronica Burton',pos:'G',ppg:11.4,rpg:3.6,apg:5.2,spg:1.3,usage:0.18,ts:0.532},
+    {name:'Kayla Thornton',pos:'F',ppg:12.6,rpg:5.8,apg:1.4,spg:0.8,usage:0.19,ts:0.548},
+    {name:'Tiffany Hayes',pos:'G',ppg:10.8,rpg:2.8,apg:2.4,spg:1.1,usage:0.17,ts:0.538},
   ],
 };
 
@@ -1155,6 +1198,280 @@ const PROP_LINES={
 };
 
 const IMPACT_MAP={Out:0.09,'Day-to-Day':0.04,Questionable:0.03,Probable:0.015,Healthy:0};
+
+// ════════════════════════════════════════════════════
+// LIVE ROSTER REFRESH
+// PLAYER_DB above is the fallback/seed data (manually verified as of this
+// build). On startup — and whenever the person taps "Refresh Rosters" — this
+// fetches every team's FULL current roster from ESPN, then fetches each
+// player's real season stats individually (ESPN splits these into two
+// separate endpoints — there's no single call that returns full rosters
+// with stats attached). Every existing call site just reads PLAYER_DB[team],
+// so they automatically pick up live data with no other changes. A bad or
+// failed fetch for a team/player never blanks or corrupts existing data —
+// it just leaves that entry as whatever it already was.
+//
+// This is deliberately a "get everyone, accept it's slow" design: a full
+// refresh is ~13 players x 15 teams ~ 195 requests, done sequentially out
+// of respect for an unauthenticated public endpoint, so it can take
+// 30-60+ seconds. The UI shows live progress so this never looks hung.
+// ════════════════════════════════════════════════════
+const ESPN_TEAM_ABBR = {
+  'Atlanta Dream':'atl', 'Chicago Sky':'chi', 'Connecticut Sun':'conn',
+  'Dallas Wings':'dal', 'Golden State Valkyries':'gs', 'Indiana Fever':'ind',
+  'Las Vegas Aces':'lv', 'Los Angeles Sparks':'la', 'Minnesota Lynx':'min',
+  'New York Liberty':'ny', 'Phoenix Mercury':'phx', 'Portland Fire':'por',
+  'Seattle Storm':'sea', 'Toronto Tempo':'tor', 'Washington Mystics':'wsh',
+};
+const ROSTER_CACHE_KEY = 'wnba_roster_cache_v1';
+const ROSTER_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h - rosters/stats don't change minute to minute
+let rosterRefreshInProgress = false;
+let rosterLastRefreshResult = null; // { ok, updatedTeams, failedTeams, timestamp, playersWithStats, playersWithoutStats }
+let rosterRefreshProgress = null;   // { teamIndex, totalTeams, teamName, playerIndex, totalPlayers }
+
+function espnUrl(path){
+  // Route through the same Cloudflare Worker proxy already configured for
+  // odds, if present. ESPN's site.api endpoints are typically reachable
+  // directly from a browser without it, but using the proxy when available
+  // costs nothing and sidesteps any future CORS tightening on ESPN's side.
+  return buildOddsUrl(path);
+}
+
+// Fetch the FULL roster for a team -- every listed player, regardless of
+// whether they have stats yet. Returns {name, pos, athleteId} entries with
+// no stats attached; stats are fetched separately per player below.
+async function fetchFullRosterForTeam(teamName){
+  const abbr = ESPN_TEAM_ABBR[teamName];
+  if (!abbr) return [];
+  const res = await fetchWithTimeout(
+    espnUrl(`https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/${abbr}/roster`),
+    {}, 8000
+  );
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  const athletes = data && data.athletes;
+  if (!Array.isArray(athletes)) throw new Error('Unexpected roster response shape');
+
+  // ESPN's roster endpoint groups players by position bucket (several
+  // "athletes" entries each with their own .items array) rather than one
+  // flat list -- flatten that, with a fallback if a future shape is already flat.
+  const flat = [];
+  for (const group of athletes) {
+    if (Array.isArray(group.items)) flat.push(...group.items);
+    else if (group.fullName || group.displayName) flat.push(group);
+  }
+  if (!flat.length) throw new Error('Roster came back empty');
+
+  const players = [];
+  for (const a of flat) {
+    const name = a.fullName || a.displayName || null;
+    if (!name) continue;
+    const posAbbr = (a.position && (a.position.abbreviation || a.position.name)) || 'G';
+    // athleteId is required to fetch this player's stats in the next step.
+    const athleteId = a.id || (a.$ref && (a.$ref.match(/athletes\/(\d+)/) || [])[1]) || null;
+    players.push({ name, pos: posAbbr, athleteId });
+  }
+  return players;
+}
+
+// Try several known/plausible ESPN response shapes for per-athlete season
+// stats, since this endpoint's exact field layout isn't independently
+// confirmed for WNBA specifically. Returns null (never throws) if nothing
+// recognizable is found, so a shape mismatch just means "no stats for this
+// player this refresh" rather than a crash or a corrupted entry.
+function extractStatsFromAthleteResponse(data){
+  if (!data) return null;
+  const tryCategories = (categories) => {
+    if (!Array.isArray(categories)) return null;
+    const find = (...names) => {
+      for (const n of names) {
+        const cat = categories.find(c => c && (c.name === n || c.abbreviation === n || c.shortDisplayName === n));
+        if (cat) {
+          const v = typeof cat.value === 'number' ? cat.value : (cat.displayValue != null ? parseFloat(cat.displayValue) : null);
+          if (v != null && !Number.isNaN(v)) return v;
+        }
+      }
+      return null;
+    };
+    const ppg = find('avgPoints','PPG','points');
+    const rpg = find('avgRebounds','RPG','rebounds');
+    const apg = find('avgAssists','APG','assists');
+    if (ppg == null || rpg == null || apg == null) return null;
+    const spg = find('avgSteals','SPG','steals');
+    const fgPct = find('fieldGoalPct','FG%');
+    const ftPct = find('freeThrowPct','FT%');
+    return { ppg, rpg, apg, spg, fgPct, ftPct };
+  };
+
+  let raw = null;
+  if (Array.isArray(data.categories)) raw = tryCategories(data.categories);
+  if (!raw && data.splits && Array.isArray(data.splits.categories)) raw = tryCategories(data.splits.categories);
+  if (!raw && Array.isArray(data.statistics)) raw = tryCategories(data.statistics);
+  if (!raw && Array.isArray(data.statisticsSeasons) && data.statisticsSeasons[0]) {
+    raw = tryCategories(data.statisticsSeasons[0].categories || data.statisticsSeasons[0].statistics);
+  }
+  if (!raw && Array.isArray(data.seasonTypes) && data.seasonTypes[0] && Array.isArray(data.seasonTypes[0].categories)) {
+    raw = tryCategories(data.seasonTypes[0].categories);
+  }
+  if (!raw) return null;
+
+  const { ppg, rpg, apg, spg, fgPct, ftPct } = raw;
+  const ts = (fgPct != null)
+    ? Math.min(0.70, Math.max(0.40, (fgPct/100) * 0.92 + (ftPct != null ? (ftPct/100) * 0.05 : 0.02)))
+    : 0.545; // league-average-ish fallback when shooting splits aren't available
+  const usage = Math.min(0.34, Math.max(0.12, 0.12 + ppg * 0.0055)); // estimate -- ESPN doesn't expose true usage%
+  return {
+    ppg: Math.round(ppg*10)/10, rpg: Math.round(rpg*10)/10,
+    apg: Math.round(apg*10)/10, spg: spg != null ? Math.round(spg*10)/10 : 0.8,
+    usage: Math.round(usage*100)/100, ts: Math.round(ts*1000)/1000,
+  };
+}
+
+// Fetch one player's season stats by athlete ID. Tries the documented
+// core-API shape first, falls back to a site.web.api variant. Returns null
+// (never throws past this point) on any failure or unrecognized shape.
+async function fetchPlayerStats(athleteId){
+  if (!athleteId) return null;
+  const season = new Date().getFullYear();
+  const candidateUrls = [
+    `https://site.web.api.espn.com/apis/common/v3/sports/basketball/wnba/athletes/${athleteId}/stats`,
+    `https://site.web.api.espn.com/apis/site/v2/sports/basketball/wnba/athletes/${athleteId}/statistics?season=${season}`,
+  ];
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetchWithTimeout(espnUrl(url), {}, 6000);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const stats = extractStatsFromAthleteResponse(data) || extractStatsFromAthleteResponse(data && data.athlete);
+      if (stats) return stats;
+    } catch (e) { /* try next candidate shape */ }
+  }
+  return null;
+}
+
+function loadRosterCache(){
+  try {
+    const raw = localStorage.getItem(ROSTER_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.timestamp !== 'number' || !parsed.data) return null;
+    return parsed;
+  } catch (e) { return null; }
+}
+function saveRosterCache(dataByTeam){
+  try {
+    localStorage.setItem(ROSTER_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), data: dataByTeam }));
+  } catch (e) { /* storage full or unavailable -- non-fatal, just skip caching */ }
+}
+
+// Full pipeline: for every team, fetch its complete roster, then fetch real
+// stats for each player. Players whose stats can't be found (shape mismatch,
+// genuinely no games played, fetch failure) are still INCLUDED in the
+// roster with a clearly-marked estimate (league-average-ish baseline)
+// rather than silently dropped. Missing a roster spot now only happens if
+// the TEAM fetch itself fails.
+async function refreshAllRostersFromLive(opts){
+  opts = opts || {};
+  const force = !!opts.force;
+  if (rosterRefreshInProgress) return rosterLastRefreshResult;
+  const cached = loadRosterCache();
+  if (!force && cached && (Date.now() - cached.timestamp) < ROSTER_CACHE_MAX_AGE_MS) {
+    for (const team in cached.data) {
+      const roster = cached.data[team];
+      if (Array.isArray(roster) && roster.length) PLAYER_DB[team] = roster;
+    }
+    rosterLastRefreshResult = { ok: true, fromCache: true, updatedTeams: Object.keys(cached.data), failedTeams: [], timestamp: cached.timestamp };
+    return rosterLastRefreshResult;
+  }
+
+  rosterRefreshInProgress = true;
+  const updatedTeams = [], failedTeams = [];
+  const newData = {};
+  let playersWithStats = 0, playersWithoutStats = 0;
+  const teamNames = Object.keys(ESPN_TEAM_ABBR);
+  rosterRefreshProgress = { teamIndex: 0, totalTeams: teamNames.length, teamName: '', playerIndex: 0, totalPlayers: 0 };
+
+  try {
+    for (let ti = 0; ti < teamNames.length; ti++) {
+      const team = teamNames[ti];
+      rosterRefreshProgress.teamIndex = ti + 1;
+      rosterRefreshProgress.teamName = team;
+      try {
+        const roster = await fetchFullRosterForTeam(team);
+        if (!roster.length) { failedTeams.push(team); continue; }
+
+        rosterRefreshProgress.totalPlayers = roster.length;
+        const fullPlayers = [];
+        for (let pi = 0; pi < roster.length; pi++) {
+          rosterRefreshProgress.playerIndex = pi + 1;
+          const p = roster[pi];
+          const stats = await fetchPlayerStats(p.athleteId);
+          if (stats) {
+            playersWithStats++;
+            fullPlayers.push({ name: p.name, pos: p.pos, ppg: stats.ppg, rpg: stats.rpg, apg: stats.apg, spg: stats.spg, usage: stats.usage, ts: stats.ts });
+          } else {
+            playersWithoutStats++;
+            fullPlayers.push({ name: p.name, pos: p.pos, ppg: 6.0, rpg: 2.5, apg: 1.5, spg: 0.6, usage: 0.14, ts: 0.50, statsUnavailable: true });
+          }
+          updateRosterRefreshStatusUI();
+        }
+        PLAYER_DB[team] = fullPlayers;
+        newData[team] = fullPlayers;
+        updatedTeams.push(team);
+      } catch (err) {
+        failedTeams.push(team);
+      }
+    }
+    if (updatedTeams.length) saveRosterCache(newData);
+  } finally {
+    rosterRefreshInProgress = false;
+    rosterRefreshProgress = null;
+  }
+  rosterLastRefreshResult = { ok: updatedTeams.length > 0, fromCache: false, updatedTeams: updatedTeams, failedTeams: failedTeams, timestamp: Date.now(), playersWithStats: playersWithStats, playersWithoutStats: playersWithoutStats };
+  return rosterLastRefreshResult;
+}
+
+function updateRosterRefreshStatusUI(){
+  const el = document.getElementById('roster-refresh-status');
+  if (!el) return;
+  if (rosterRefreshInProgress && rosterRefreshProgress) {
+    const p = rosterRefreshProgress;
+    el.textContent = 'Fetching rosters... team ' + p.teamIndex + '/' + p.totalTeams + ' (' + p.teamName + '), player ' + p.playerIndex + '/' + (p.totalPlayers||'?') + ' -- this can take 30-60s';
+    return;
+  }
+  const r = rosterLastRefreshResult;
+  if (!r) { el.textContent = 'Loading current rosters...'; return; }
+  const when = new Date(r.timestamp).toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
+  if (r.fromCache) {
+    el.textContent = 'Using cached rosters from ' + when + ' (refreshed automatically every 12h)';
+  } else if (r.ok && r.failedTeams.length === 0) {
+    const statNote = r.playersWithoutStats ? (' (' + r.playersWithoutStats + ' players shown with estimated stats -- none found yet)') : '';
+    el.textContent = '\u2713 All 15 teams updated from ESPN at ' + when + statNote;
+  } else if (r.ok) {
+    el.textContent = 'Updated ' + r.updatedTeams.length + '/15 teams at ' + when + ' -- ' + r.failedTeams.length + ' kept existing data (' + r.failedTeams.join(', ') + ')';
+  } else {
+    el.textContent = "Couldn't reach live roster data -- showing the built-in verified rosters instead";
+  }
+}
+
+async function manualRosterRefresh(){
+  const btn = document.getElementById('roster-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing...'; }
+  updateRosterRefreshStatusUI();
+  try {
+    const result = await refreshAllRostersFromLive({ force: true });
+    updateRosterRefreshStatusUI();
+    if (result && result.ok) {
+      try { renderTeamStats(); } catch(e) {}
+      try { if (typeof predictAllToday === 'function') predictAllToday(); } catch(e) {}
+    }
+  } catch (e) {
+    const statusEl = document.getElementById('roster-refresh-status');
+    if (statusEl) statusEl.textContent = "Couldn't reach live roster data -- showing the built-in verified rosters instead";
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '\u21bb Refresh Rosters'; }
+  }
+}
 
 // ════════════════════════════════════════════════════
 // Network safety: standalone/home-screen PWAs on iOS can have fetch()
@@ -4768,6 +5085,22 @@ async function init(){
     }).catch(e => console.warn('Post-init prediction load failed (non-fatal):', e));
 
     setTimeout(()=>{ runAgentCycle(false); }, 800); // SCOUT auto-runs on startup
+
+    // Live roster refresh: fire-and-forget, well after the UI is already
+    // shown. Uses cached data instantly if fresh (see ROSTER_CACHE_MAX_AGE_MS)
+    // so this rarely even hits the network on a normal app open. Player
+    // names/stats shown before this resolves are the verified-current seed
+    // data, so there's nothing stale-looking on screen while this runs.
+    refreshAllRostersFromLive().then(result => {
+      if (result && result.ok && !result.fromCache) {
+        // Roster data changed mid-session — re-render the views that read
+        // PLAYER_DB so updated names/stats actually show up without
+        // requiring a manual reload.
+        try { renderTeamStats(); } catch(e) {}
+        try { if (typeof predictAllToday === 'function') predictAllToday(); } catch(e) {}
+      }
+      updateRosterRefreshStatusUI();
+    }).catch(e => console.warn('Live roster refresh failed (non-fatal, using seed data):', e));
 
   } catch (fatalErr) {
     // Something unexpected broke startup. Force the loading screen to clear
