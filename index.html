@@ -947,6 +947,24 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
     <p style="font-size:11px;color:var(--muted);margin-top:12px">💡 Tip: Log games from the last week or two to get a quick read. 20+ games gives a real signal.</p>
   </div>
 
+  <!-- Real history auto-imports from ESPN on load — see status below -->
+  <div class="card" style="padding:20px 24px;margin-bottom:20px;border-left:3px solid var(--green)">
+    <div style="font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px">Real Results from ESPN</div>
+    <p style="font-size:12px;color:#bbb;margin-bottom:12px;line-height:1.6" id="bt-import-status">Checking for new completed games…</p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+      <div class="field-group" style="max-width:140px">
+        <label>Days back</label>
+        <select id="bt-import-days">
+          <option value="7">Last 7 days</option>
+          <option value="14" selected>Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+      </div>
+      <button class="btn btn-surface" onclick="importRealBacktestHistory()" id="bt-import-btn">↻ Check Again</button>
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin-top:10px">This runs automatically every time you open the dashboard — no action needed. Use "Check Again" only if you want to look further back than the automatic check, or pull in anything from today.</p>
+  </div>
+
   <!-- Accuracy summary -->
   <div class="section-label">Model Accuracy</div>
   <div class="stats-summary" id="bt-summary">
@@ -4597,6 +4615,84 @@ async function clearBacktest() {
   renderBacktest();
 }
 
+async function importRealBacktestHistory() {
+  const daysBack = parseInt(document.getElementById('bt-import-days').value) || 14;
+  const btn = document.getElementById('bt-import-btn');
+  const statusEl = document.getElementById('bt-import-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+
+  const existingIds = new Set(backtestGames.map(g => g.espnEventId).filter(Boolean));
+  let imported = 0, skippedDuplicate = 0, skippedIncomplete = 0, daysFailed = 0;
+
+  try {
+    for (let i = 1; i <= daysBack; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateKey = dateToKey(d);
+      const espnDate = dateKeyToESPN(dateKey);
+      if (statusEl) statusEl.textContent = `Checking ${dateKey}… (day ${i}/${daysBack})`;
+
+      try {
+        const res = await fetchWithTimeout(
+          'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=' + espnDate,
+          { mode:'cors' }, 8000
+        );
+        if (!res.ok) { daysFailed++; continue; }
+        const json = await res.json();
+        const events = json.events || [];
+
+        for (const ev of events) {
+          const comp = (ev.competitions && ev.competitions[0]) || {};
+          const st = (ev.status && ev.status.type) || {};
+          if (!st.completed) { skippedIncomplete++; continue; } // only finished games count as real history
+
+          let home = null, away = null, homeScore = null, awayScore = null;
+          for (const c of (comp.competitors || [])) {
+            if (c.homeAway === 'home') { home = c.team && c.team.displayName; homeScore = c.score; }
+            else { away = c.team && c.team.displayName; awayScore = c.score; }
+          }
+          if (!home || !away || homeScore == null || awayScore == null) continue;
+          if (ev.id && existingIds.has(ev.id)) { skippedDuplicate++; continue; } // already imported previously
+
+          // The model needs both teams in PLAYER_DB/teamData to predict —
+          // skip gracefully (don't crash the import) if either side isn't
+          // one of the 15 teams we track.
+          const pred = predict(away, home);
+          if (!pred) { skippedIncomplete++; continue; }
+
+          const aScore = Number(awayScore), hScore = Number(homeScore);
+          backtestGames.unshift({
+            id: Date.now() + imported,
+            away, home, awayScore: aScore, homeScore: hScore,
+            actualWinner: hScore > aScore ? 'home' : 'away',
+            actualMargin: Math.abs(hScore - aScore),
+            predAway: pred.awayTotal, predHome: pred.homeTotal,
+            predWinner: pred.winner, predMargin: pred.factors.spread,
+            predWinProb: pred.winProb, aiRating: pred.aiRating,
+            espnEventId: ev.id || null, // dedupe key for future imports
+          });
+          if (ev.id) existingIds.add(ev.id);
+          imported++;
+        }
+      } catch (dayErr) {
+        daysFailed++; // network/timeout for this specific day — keep going with the rest
+      }
+    }
+
+    localStorage.setItem('wnba_backtest', JSON.stringify(backtestGames));
+    renderBacktest();
+
+    const parts = [`Imported ${imported} real completed game${imported===1?'':'s'}`];
+    if (skippedDuplicate) parts.push(`${skippedDuplicate} already logged`);
+    if (daysFailed) parts.push(`${daysFailed} day${daysFailed===1?'':'s'} couldn't be reached`);
+    if (statusEl) statusEl.textContent = parts.join(' · ') + '.';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Couldn't reach ESPN for historical results — try again in a moment.";
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Check Again'; }
+  }
+}
+
 function loadSampleBacktest() {
   // Generate sample completed games using current team data so the user can see how it works
   const matchups = [
@@ -5141,6 +5237,20 @@ async function init(){
       }
       updateRosterRefreshStatusUI();
     }).catch(e => console.warn('Live roster refresh failed (non-fatal, using seed data):', e));
+
+    // Backtest history: quietly check ESPN for newly-completed games every
+    // time the dashboard opens, so the Back-Test tab has fresh real results
+    // without the person needing to do anything. Defaults to a 7-day
+    // lookback for this automatic check (kept short so it doesn't add much
+    // to startup time); the tab's "Check Again" button with a wider window
+    // is there if more history is wanted on demand.
+    setTimeout(() => {
+      try {
+        const daysEl = document.getElementById('bt-import-days');
+        if (daysEl) daysEl.value = '7';
+        importRealBacktestHistory();
+      } catch(e) { console.warn('Backtest auto-import failed (non-fatal):', e); }
+    }, 1500);
 
   } catch (fatalErr) {
     // Something unexpected broke startup. Force the loading screen to clear
