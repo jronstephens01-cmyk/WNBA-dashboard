@@ -434,6 +434,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
       <div class="field-group"><label>Home Team</label><select id="home-select"></select></div>
       <button class="btn btn-accent" onclick="addPrediction()">▶ Run Prediction</button>
     </div>
+    <div id="game-pick-of-day-card"></div>
     <div class="section-label" id="pred-label" style="display:none">Game Predictions</div>
     <div id="predictions-container"></div>
   </div>
@@ -3876,6 +3877,7 @@ async function loadPredSchedule(dateKey) {
   predScheduleDate = dateKey;
   activeDateKey = dateKey; // keep parlay tab in sync too
   syncDateInput(dateKey);
+  renderGamePickOfTheDay(); // re-scope immediately to the new date — clears to empty if nothing's predicted for it yet
 
   const list = document.getElementById('pred-schedule-list');
   const srcBadge = document.getElementById('pred-sched-source');
@@ -3970,6 +3972,56 @@ function predictFromSchedule(away, home) {
   document.getElementById('pred-' + r.id)?.scrollIntoView({ behavior:'smooth', block:'center' });
 }
 
+// "Pick of the Day" for the Predictions tab — the single game the model is
+// MOST confident in (highest win probability for whichever side it favors),
+// across everything predicted for today. Same philosophy as the player
+// props version: ranked purely on the model's own confidence, not on how
+// the moneyline happens to be priced — a -500 favorite the model is 90%
+// sure about is exactly the kind of "safe" pick a daily ladder/streak
+// challenge wants, even though the payout on it alone would be tiny.
+function getGamePickOfTheDay(){
+  if (!predictions.length) return null;
+  // Only consider predictions tagged with the currently-active prediction
+  // date (i.e. ones that came from "Predict All Games" for this date) —
+  // custom one-off matchups via the manual selector aren't part of
+  // "today's slate" and switching dates shouldn't surface a stale pick
+  // from a different day.
+  const todays = predictions.filter(p => p.scheduleDate === predScheduleDate);
+  if (!todays.length) return null;
+  return todays.reduce((best, p) => (!best || p.winProb > best.winProb) ? p : best, null);
+}
+
+function renderGamePickOfTheDay(){
+  const el = document.getElementById('game-pick-of-day-card');
+  if (!el) return;
+  const pick = getGamePickOfTheDay();
+  if (!pick) { el.innerHTML = ''; return; }
+
+  const favTeam = pick.winner === 'home' ? pick.homeTeam : pick.awayTeam;
+  const dogTeam = pick.winner === 'home' ? pick.awayTeam : pick.homeTeam;
+  const favColor = TEAM_COLORS[favTeam] || '#555';
+
+  el.innerHTML = `
+    <div class="card" style="padding:20px 24px;margin-bottom:16px;border-left:3px solid var(--gold);background:linear-gradient(135deg, rgba(232,160,32,.08), transparent)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <span style="font-size:18px">⭐</span>
+        <div style="font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--gold)">Pick of the Day</div>
+        <span style="font-size:11px;color:var(--muted);margin-left:auto">Highest model confidence across today's slate</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <span style="width:8px;height:8px;border-radius:50%;background:${favColor};display:inline-block"></span>
+        <span style="font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:var(--text)">${favTeam}</span>
+        <span style="font-size:12px;color:var(--muted)">to beat ${dogTeam}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:10px">
+        <div style="font-size:22px;font-weight:800;color:var(--green)">${pick.winProb}% Win Prob</div>
+        <div style="font-size:12px;color:var(--muted)">Projected: <strong style="color:var(--text)">${pick.awayTeam} ${pick.awayTotal} – ${pick.homeTotal} ${pick.homeTeam}</strong> · Margin: <strong style="color:var(--text)">${Math.abs(pick.margin)}</strong> · A.I. Rating: <strong style="color:var(--gold)">${pick.aiRating}/10</strong></div>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:10px">This is the model's own confidence, not a market price — verify the real moneyline at your sportsbook before betting.</p>
+    </div>
+  `;
+}
+
 async function predictAllToday() {
   // Make sure we have the schedule cached for this date
   const result = await fetchScheduleForDate(predScheduleDate);
@@ -3983,6 +4035,7 @@ async function predictAllToday() {
     if (!teamData[g.away] || !teamData[g.home]) { skipped++; continue; }
     const r = predict(g.away, g.home);
     if (!r) { skipped++; continue; }
+    r.scheduleDate = predScheduleDate; // tag so Pick of the Day can scope to "today's slate" specifically
     predictions.unshift(r);
     document.getElementById('predictions-container').insertAdjacentHTML('afterbegin', renderCard(r));
     added++;
@@ -3990,6 +4043,7 @@ async function predictAllToday() {
   if (added) {
     document.getElementById('pred-label').style.display = 'flex';
     updateShareDropdown();
+    renderGamePickOfTheDay();
     document.getElementById('pred-label').scrollIntoView({ behavior:'smooth', block:'start' });
   } else if (skipped) {
     showAppAlert('No upcoming games to predict — they may already be final or missing rating data.');
