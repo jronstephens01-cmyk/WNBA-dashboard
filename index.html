@@ -947,23 +947,6 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
     <p style="font-size:11px;color:var(--muted);margin-top:12px">💡 Tip: Log games from the last week or two to get a quick read. 20+ games gives a real signal.</p>
   </div>
 
-  <!-- Import real history from ESPN -->
-  <div class="card" style="padding:20px 24px;margin-bottom:20px;border-left:3px solid var(--green)">
-    <div style="font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px">Import Real Results from ESPN</div>
-    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
-      <div class="field-group" style="max-width:140px">
-        <label>Days back</label>
-        <select id="bt-import-days">
-          <option value="7">Last 7 days</option>
-          <option value="14" selected>Last 14 days</option>
-          <option value="30">Last 30 days</option>
-        </select>
-      </div>
-      <button class="btn btn-green" onclick="importRealBacktestHistory()" id="bt-import-btn">⬇ Import Completed Games</button>
-    </div>
-    <p style="font-size:11px;color:var(--muted);margin-top:12px" id="bt-import-status">Pulls actual final scores from ESPN, one day at a time, and runs the model's prediction against each — same as logging manually, just automatic.</p>
-  </div>
-
   <!-- Accuracy summary -->
   <div class="section-label">Model Accuracy</div>
   <div class="stats-summary" id="bt-summary">
@@ -2342,6 +2325,7 @@ function toggleOddsPanel() {
 
 function selectOddsProvider(p) {
   oddsProvider = p;
+  localStorage.setItem('wnba_odds_provider', p); // persist immediately — previously this only saved when "Connect" was clicked, so selecting a provider then reloading before clicking Connect would silently revert to the default
   document.getElementById('op-theoddsapi').style.borderColor = p==='theoddsapi' ? 'var(--purple)' : 'var(--border)';
   document.getElementById('op-sharpapi').style.borderColor = p==='sharpapi' ? 'var(--purple)' : 'var(--border)';
 }
@@ -2425,10 +2409,10 @@ async function testOddsConnection() {
       const events = await res.json();
       result.innerHTML = '✅ <strong>Connected!</strong> Found ' + events.length + ' WNBA events.' + (remaining?' Requests left: ' + remaining + '.':'') + ' <span style="color:var(--gold)">Player props need their Business plan ($99/mo).</span>';
     } else {
-      const realUrl = 'https://api.sharpapi.io/v1/odds/basketball_wnba/events';
+      const realUrl = 'https://api.sharpapi.io/api/v1/odds?league=WNBA';
       const url = buildOddsUrl(realUrl);
       let res;
-      try { res = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + oddsApiKey } }); }
+      try { res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } }); }
       catch(netErr) {
         result.innerHTML = describeProxyError(netErr, oddsProxyUrl) + ' <button class="btn btn-surface" style="font-size:11px;padding:4px 10px;margin-top:6px" onclick="showProxyHelp()">How to fix</button>';
         return;
@@ -2437,8 +2421,8 @@ async function testOddsConnection() {
       if (res.status === 403) { result.innerHTML = '❌ Got 403 Forbidden' + (oddsProxyUrl ? ' from your proxy — check that worker.js was deployed correctly and allows api.sharpapi.io.' : '.'); return; }
       if (!res.ok) { result.innerHTML = '❌ ' + (oddsProxyUrl?'Your proxy':'SharpAPI') + ' returned ' + res.status + '. Check the key and your plan.'; return; }
       const data = await res.json();
-      const count = Array.isArray(data) ? data.length : (data.events?.length || 0);
-      result.innerHTML = '✅ <strong>Connected to SharpAPI!</strong> Found ' + count + ' WNBA events.';
+      const count = Array.isArray(data) ? data.length : (data.data?.length || 0);
+      result.innerHTML = '✅ <strong>Connected to SharpAPI!</strong> Found ' + count + ' WNBA odds line' + (count===1?'':'s') + '.';
     }
     if (typeof agentLogEntry === 'function') agentLogEntry('auto', 'Odds API connection test passed (' + oddsProvider + ')');
   } catch(e) {
@@ -2510,9 +2494,9 @@ async function fetchLiveOddsForDate(dateKey) {
       // SharpAPI
       let res;
       try {
-        const realUrl = 'https://api.sharpapi.io/v1/odds/basketball_wnba/player-props?markets=points,rebounds,assists&books=fanduel,draftkings';
+        const realUrl = 'https://api.sharpapi.io/api/v1/odds?league=WNBA&market_type=player_points,player_rebounds,player_assists';
         const url = buildOddsUrl(realUrl);
-        res = await fetchWithTimeout(url, { headers: { 'Authorization': 'Bearer ' + oddsApiKey } });
+        res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } });
       } catch (netErr) {
         lastOddsStatus = { ok:false, isCORS:!oddsProxyUrl,
           message: describeProxyError(netErr, oddsProxyUrl).replace(/<\/?strong>/g,'') };
@@ -2573,16 +2557,43 @@ function parseOddsApiEvent(event, lines) {
 }
 
 function parseSharpApi(data, lines) {
-  // SharpAPI's exact schema varies; handle a common shape defensively
+  // SharpAPI's documented response shape: { data: [ { market_type, selection,
+  // odds_american, sportsbook, home_team, away_team, ... } ], pagination, updated_at }
+  // Each line item is ONE side of a market (e.g. one row for "Over 18.5" and
+  // a separate row for "Under 18.5"), not a combined over/under pair like
+  // The Odds API returns — so this builds up both sides per player/stat
+  // before lines[] is considered complete for that combo.
   const items = Array.isArray(data) ? data : (data.data || data.props || []);
-  const statMap = { points:'pts', rebounds:'reb', assists:'ast' };
+  const statMap = {
+    player_points:'pts', points:'pts',
+    player_rebounds:'reb', rebounds:'reb',
+    player_assists:'ast', assists:'ast',
+  };
   for (const it of items) {
-    const player = it.player || it.player_name || it.name;
-    const stat = statMap[(it.market || it.stat || '').toLowerCase()];
-    const line = it.line ?? it.point ?? it.handicap;
-    if (!player || !stat || line == null) continue;
+    const marketKey = (it.market_type || it.market || it.stat || '').toLowerCase();
+    const stat = statMap[marketKey];
+    if (!stat) continue;
+    // selection is typically something like "LeBron James Over" / "... Under"
+    // or a separate field may carry the player name directly — handle both.
+    const selection = it.selection || '';
+    const player = it.player || it.player_name ||
+      selection.replace(/\s+(Over|Under)\s*$/i, '').trim();
+    const isOver = it.side ? /over/i.test(it.side) : /over/i.test(selection);
+    const isUnder = it.side ? /under/i.test(it.side) : /under/i.test(selection);
+    const line = it.line ?? it.point ?? it.handicap ?? it.odds_point;
+    const americanOdds = it.odds_american ?? it.over_odds ?? it.under_odds ?? it.odds;
+    if (!player || line == null) continue;
+
     const key = player + '|' + stat;
-    lines[key] = { line: Number(line), over: it.over_odds ?? it.over, under: it.under_odds ?? it.under, book: it.book || it.sportsbook || 'sharp' };
+    if (!lines[key]) lines[key] = { line: Number(line), over: null, under: null, book: it.sportsbook || it.book || 'sharp' };
+    if (isOver) lines[key].over = americanOdds;
+    else if (isUnder) lines[key].under = americanOdds;
+    else {
+      // No clear over/under side detected — keep whatever we got rather
+      // than dropping the line entirely; the UI already handles a missing
+      // one-sided value gracefully.
+      if (lines[key].over == null) lines[key].over = americanOdds;
+    }
   }
 }
 // ════════════════════════════════════════════════════
@@ -4584,90 +4595,6 @@ async function clearBacktest() {
   backtestGames = [];
   localStorage.setItem('wnba_backtest', '[]');
   renderBacktest();
-}
-
-// Fetch real completed games from ESPN over the last N days and log them as
-// genuine backtest entries — the model's prediction is run blind against
-// each ACTUAL final score, same math as manually typing one in via
-// addBacktestGame(), just automated across many days. Skips any date that's
-// already been imported (tracked by espnEventId) so re-running this never
-// creates duplicates.
-async function importRealBacktestHistory() {
-  const daysBack = parseInt(document.getElementById('bt-import-days').value) || 14;
-  const btn = document.getElementById('bt-import-btn');
-  const statusEl = document.getElementById('bt-import-status');
-  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
-
-  const existingIds = new Set(backtestGames.map(g => g.espnEventId).filter(Boolean));
-  let imported = 0, skippedDuplicate = 0, skippedIncomplete = 0, daysFailed = 0;
-
-  try {
-    for (let i = 1; i <= daysBack; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dateKey = dateToKey(d);
-      const espnDate = dateKeyToESPN(dateKey);
-      if (statusEl) statusEl.textContent = `Checking ${dateKey}… (day ${i}/${daysBack})`;
-
-      try {
-        const res = await fetchWithTimeout(
-          'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=' + espnDate,
-          { mode:'cors' }, 8000
-        );
-        if (!res.ok) { daysFailed++; continue; }
-        const json = await res.json();
-        const events = json.events || [];
-
-        for (const ev of events) {
-          const comp = (ev.competitions && ev.competitions[0]) || {};
-          const st = (ev.status && ev.status.type) || {};
-          if (!st.completed) { skippedIncomplete++; continue; } // only finished games count as real history
-
-          let home = null, away = null, homeScore = null, awayScore = null;
-          for (const c of (comp.competitors || [])) {
-            if (c.homeAway === 'home') { home = c.team && c.team.displayName; homeScore = c.score; }
-            else { away = c.team && c.team.displayName; awayScore = c.score; }
-          }
-          if (!home || !away || homeScore == null || awayScore == null) continue;
-          if (ev.id && existingIds.has(ev.id)) { skippedDuplicate++; continue; } // already imported previously
-
-          // The model needs both teams in PLAYER_DB/teamData to predict —
-          // skip gracefully (don't crash the import) if either side isn't
-          // one of the 15 teams we track.
-          const pred = predict(away, home);
-          if (!pred) { skippedIncomplete++; continue; }
-
-          const aScore = Number(awayScore), hScore = Number(homeScore);
-          backtestGames.unshift({
-            id: Date.now() + imported,
-            away, home, awayScore: aScore, homeScore: hScore,
-            actualWinner: hScore > aScore ? 'home' : 'away',
-            actualMargin: Math.abs(hScore - aScore),
-            predAway: pred.awayTotal, predHome: pred.homeTotal,
-            predWinner: pred.winner, predMargin: pred.factors.spread,
-            predWinProb: pred.winProb, aiRating: pred.aiRating,
-            espnEventId: ev.id || null, // dedupe key for future imports
-          });
-          if (ev.id) existingIds.add(ev.id);
-          imported++;
-        }
-      } catch (dayErr) {
-        daysFailed++; // network/timeout for this specific day — keep going with the rest
-      }
-    }
-
-    localStorage.setItem('wnba_backtest', JSON.stringify(backtestGames));
-    renderBacktest();
-
-    const parts = [`Imported ${imported} real completed game${imported===1?'':'s'}`];
-    if (skippedDuplicate) parts.push(`${skippedDuplicate} already logged`);
-    if (daysFailed) parts.push(`${daysFailed} day${daysFailed===1?'':'s'} couldn't be reached`);
-    if (statusEl) statusEl.textContent = parts.join(' · ') + '.';
-  } catch (e) {
-    if (statusEl) statusEl.textContent = "Couldn't reach ESPN for historical results — try again in a moment.";
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⬇ Import Completed Games'; }
-  }
 }
 
 function loadSampleBacktest() {
