@@ -947,6 +947,23 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
     <p style="font-size:11px;color:var(--muted);margin-top:12px">💡 Tip: Log games from the last week or two to get a quick read. 20+ games gives a real signal.</p>
   </div>
 
+  <!-- Import real history from ESPN -->
+  <div class="card" style="padding:20px 24px;margin-bottom:20px;border-left:3px solid var(--green)">
+    <div style="font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:14px">Import Real Results from ESPN</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+      <div class="field-group" style="max-width:140px">
+        <label>Days back</label>
+        <select id="bt-import-days">
+          <option value="7">Last 7 days</option>
+          <option value="14" selected>Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+      </div>
+      <button class="btn btn-green" onclick="importRealBacktestHistory()" id="bt-import-btn">⬇ Import Completed Games</button>
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin-top:12px" id="bt-import-status">Pulls actual final scores from ESPN, one day at a time, and runs the model's prediction against each — same as logging manually, just automatic.</p>
+  </div>
+
   <!-- Accuracy summary -->
   <div class="section-label">Model Accuracy</div>
   <div class="stats-summary" id="bt-summary">
@@ -3345,6 +3362,17 @@ function renderTeamStats(){
   grid.innerHTML=sorted.map((t,rank)=>{
     const dots=(t.form||[]).map(g=>`<div class="form-dot ${g}"></div>`).join('');
     const injCount=(injuries[t.name]||[]).filter(i=>i.status!=='Healthy'&&i.status!=='Probable').length;
+    const roster=(PLAYER_DB[t.name]||[]).slice().sort((a,b)=>b.ppg-a.ppg);
+    const rosterHtml = roster.length ? `
+      <div class="stat-item" style="grid-column:1/-1;padding-top:8px;border-top:1px solid var(--border,#2a2a34)">
+        <div style="font-size:10px;color:var(--muted);letter-spacing:.04em;margin-bottom:6px">ROSTER</div>
+        ${roster.map(p=>`
+          <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:12px;padding:3px 0">
+            <span style="color:var(--text)">${p.name}${p.statsUnavailable?' <span style="color:var(--muted);font-size:10px">(est.)</span>':''}</span>
+            <span style="color:var(--muted);white-space:nowrap;margin-left:8px">${p.pos} · ${p.ppg.toFixed(1)} PPG</span>
+          </div>
+        `).join('')}
+      </div>` : '';
     return`<div class="team-stat-card">
       <div class="team-stat-header" style="background:${t.color}22;border-bottom:2px solid ${t.color}">
         <div class="team-color-dot" style="background:${t.color}"></div>
@@ -3356,6 +3384,7 @@ function renderTeamStats(){
         <div class="stat-item"><span class="val">${t.oppg.toFixed(1)}</span><span class="lbl">OPP</span></div>
         <div class="stat-item" style="grid-column:1/-1"><span class="lbl">Last 5</span><div class="form-dots">${dots}</div></div>
         ${injCount?`<div class="stat-item" style="grid-column:1/-1"><span class="lbl" style="color:var(--accent)">⚠ ${injCount} concern${injCount>1?'s':''}</span></div>`:''}
+        ${rosterHtml}
       </div>
     </div>`;
   }).join('');
@@ -4555,6 +4584,90 @@ async function clearBacktest() {
   backtestGames = [];
   localStorage.setItem('wnba_backtest', '[]');
   renderBacktest();
+}
+
+// Fetch real completed games from ESPN over the last N days and log them as
+// genuine backtest entries — the model's prediction is run blind against
+// each ACTUAL final score, same math as manually typing one in via
+// addBacktestGame(), just automated across many days. Skips any date that's
+// already been imported (tracked by espnEventId) so re-running this never
+// creates duplicates.
+async function importRealBacktestHistory() {
+  const daysBack = parseInt(document.getElementById('bt-import-days').value) || 14;
+  const btn = document.getElementById('bt-import-btn');
+  const statusEl = document.getElementById('bt-import-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+
+  const existingIds = new Set(backtestGames.map(g => g.espnEventId).filter(Boolean));
+  let imported = 0, skippedDuplicate = 0, skippedIncomplete = 0, daysFailed = 0;
+
+  try {
+    for (let i = 1; i <= daysBack; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateKey = dateToKey(d);
+      const espnDate = dateKeyToESPN(dateKey);
+      if (statusEl) statusEl.textContent = `Checking ${dateKey}… (day ${i}/${daysBack})`;
+
+      try {
+        const res = await fetchWithTimeout(
+          'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=' + espnDate,
+          { mode:'cors' }, 8000
+        );
+        if (!res.ok) { daysFailed++; continue; }
+        const json = await res.json();
+        const events = json.events || [];
+
+        for (const ev of events) {
+          const comp = (ev.competitions && ev.competitions[0]) || {};
+          const st = (ev.status && ev.status.type) || {};
+          if (!st.completed) { skippedIncomplete++; continue; } // only finished games count as real history
+
+          let home = null, away = null, homeScore = null, awayScore = null;
+          for (const c of (comp.competitors || [])) {
+            if (c.homeAway === 'home') { home = c.team && c.team.displayName; homeScore = c.score; }
+            else { away = c.team && c.team.displayName; awayScore = c.score; }
+          }
+          if (!home || !away || homeScore == null || awayScore == null) continue;
+          if (ev.id && existingIds.has(ev.id)) { skippedDuplicate++; continue; } // already imported previously
+
+          // The model needs both teams in PLAYER_DB/teamData to predict —
+          // skip gracefully (don't crash the import) if either side isn't
+          // one of the 15 teams we track.
+          const pred = predict(away, home);
+          if (!pred) { skippedIncomplete++; continue; }
+
+          const aScore = Number(awayScore), hScore = Number(homeScore);
+          backtestGames.unshift({
+            id: Date.now() + imported,
+            away, home, awayScore: aScore, homeScore: hScore,
+            actualWinner: hScore > aScore ? 'home' : 'away',
+            actualMargin: Math.abs(hScore - aScore),
+            predAway: pred.awayTotal, predHome: pred.homeTotal,
+            predWinner: pred.winner, predMargin: pred.factors.spread,
+            predWinProb: pred.winProb, aiRating: pred.aiRating,
+            espnEventId: ev.id || null, // dedupe key for future imports
+          });
+          if (ev.id) existingIds.add(ev.id);
+          imported++;
+        }
+      } catch (dayErr) {
+        daysFailed++; // network/timeout for this specific day — keep going with the rest
+      }
+    }
+
+    localStorage.setItem('wnba_backtest', JSON.stringify(backtestGames));
+    renderBacktest();
+
+    const parts = [`Imported ${imported} real completed game${imported===1?'':'s'}`];
+    if (skippedDuplicate) parts.push(`${skippedDuplicate} already logged`);
+    if (daysFailed) parts.push(`${daysFailed} day${daysFailed===1?'':'s'} couldn't be reached`);
+    if (statusEl) statusEl.textContent = parts.join(' · ') + '.';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = "Couldn't reach ESPN for historical results — try again in a moment.";
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⬇ Import Completed Games'; }
+  }
 }
 
 function loadSampleBacktest() {
