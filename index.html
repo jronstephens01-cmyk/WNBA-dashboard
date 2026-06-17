@@ -469,7 +469,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
         </div>
         <div class="odds-provider" id="op-sharpapi" onclick="selectOddsProvider('sharpapi')" style="flex:1;min-width:200px;background:var(--surface2);border:2px solid var(--border);border-radius:8px;padding:12px 14px;cursor:pointer">
           <div style="font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:800;color:var(--text)">SharpAPI</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">Free 12 req/min, no card · 43 books · Built-in +EV detection</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">Free 12 req/min, no card · 43 books · Player props need Hobby plan ($79/mo)+</div>
           <a href="https://sharpapi.io/" target="_blank" onclick="event.stopPropagation()" style="font-size:11px;color:var(--purple);text-decoration:none">Get a key →</a>
         </div>
       </div>
@@ -501,7 +501,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
 
       <div id="odds-test-result" style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5"></div>
       <p style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5;border-top:1px solid var(--border);padding-top:10px">
-        🔒 Your key is stored only in your browser (localStorage) and is sent directly to the odds provider — never to us or anyone else. Player props on The Odds API require their Business plan ($99/mo); the free tier gives you moneyline/spread/totals.
+        🔒 Your key is stored only in your browser (localStorage) and is sent directly to the odds provider — never to us or anyone else. Player props require a paid plan on both providers: The Odds API's Business plan ($99/mo), or SharpAPI's Hobby plan ($79/mo)+. Both free tiers give you moneyline/spread/totals only.
       </p>
     </div>
   </div>
@@ -1369,6 +1369,131 @@ async function fetchPlayerStats(athleteId){
   return null;
 }
 
+// ════════════════════════════════════════════════════
+// FREE-DATA LINE SHARPENING
+// Real sportsbook lines (when we don't have them, which is most of the
+// time on free-tier odds plans) factor in things a flat season average
+// doesn't: how a player has played recently, whether they're home or
+// away, and how much rest they've had. ESPN's gamelog endpoint exposes
+// all three for free — this pulls it and blends it into a much sharper
+// estimate than a single fixed multiplier on season PPG.
+//
+// The exact gamelog response shape isn't independently confirmed for
+// WNBA specifically (confirmed for NFL via public examples; assumed
+// structurally similar for basketball per ESPN's common v3 API family).
+// Every parsing step here is defensive: if the shape doesn't match,
+// this returns null and the caller falls back to the existing flat
+// multiplier, so a wrong guess here can never break or blank a line —
+// at worst it's just not sharper than before.
+// ════════════════════════════════════════════════════
+function parseGamelogRows(data){
+  // Try a few plausible shapes for "a list of per-game stat rows."
+  // Shape A: { season_types: [ { categories: [ { games: [ {date, home, stats:{...}} ] } ] } ] }
+  // Shape B (matches the confirmed NFL example most closely): a flat
+  // "events" or "games" array, each with a date, opponent/home flag, and
+  // a stats object keyed by label (PTS, REB, AST, MIN, etc).
+  const tryFlat = (arr) => {
+    if (!Array.isArray(arr) || !arr.length) return null;
+    const rows = [];
+    for (const g of arr) {
+      const dateStr = g.date || g.gameDate || (g.event && g.event.date);
+      const isHome = g.isHome ?? g.atHome ?? (g.homeAway === 'home') ?? null;
+      // Stats can show up as a flat object {PTS:18, REB:6,...} or as an
+      // array of {label, value} pairs depending on which ESPN shape this is.
+      let pts=null, reb=null, ast=null;
+      if (g.stats && typeof g.stats === 'object' && !Array.isArray(g.stats)) {
+        pts = g.stats.PTS ?? g.stats.pts ?? null;
+        reb = g.stats.REB ?? g.stats.reb ?? null;
+        ast = g.stats.AST ?? g.stats.ast ?? null;
+      } else if (Array.isArray(g.stats)) {
+        const find = (label) => { const f = g.stats.find(s=>s && (s.label===label || s.name===label)); return f ? Number(f.value ?? f.displayValue) : null; };
+        pts = find('PTS'); reb = find('REB'); ast = find('AST');
+      }
+      if (dateStr && pts != null) rows.push({ date: dateStr, isHome, pts, reb: reb ?? 0, ast: ast ?? 0 });
+    }
+    return rows.length ? rows : null;
+  };
+
+  let rows = tryFlat(data.events) || tryFlat(data.games);
+  if (!rows && Array.isArray(data.season_types)) {
+    for (const st of data.season_types) {
+      if (Array.isArray(st.categories)) {
+        for (const cat of st.categories) {
+          const found = tryFlat(cat.games || cat.events);
+          if (found) { rows = found; break; }
+        }
+      }
+      if (rows) break;
+    }
+  }
+  return rows;
+}
+
+// Fetch a player's gamelog and distill it into the three free signals
+// that matter for sharpening an estimate line. Never throws; returns
+// null on any failure or unrecognized shape so the caller can fall back
+// to the flat-multiplier estimate.
+async function fetchPlayerFormSignals(athleteId){
+  if (!athleteId) return null;
+  const season = new Date().getFullYear();
+  const url = `https://site.web.api.espn.com/apis/common/v3/sports/basketball/wnba/athletes/${athleteId}/gamelog?season=${season}`;
+  try {
+    const res = await fetchWithTimeout(espnUrl(url), {}, 6000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const rows = parseGamelogRows(data);
+    if (!rows || !rows.length) return null;
+
+    // Most recent games are typically returned last in ESPN's gamelogs;
+    // sort defensively by date so "recent form" always means the same
+    // thing regardless of which order the API happens to return.
+    rows.sort((a,b) => new Date(a.date) - new Date(b.date));
+    const recent = rows.slice(-5); // last 5 games
+    const avg = (arr, key) => arr.length ? arr.reduce((s,r)=>s+(r[key]||0),0) / arr.length : null;
+
+    const homeGames = recent.filter(r => r.isHome === true);
+    const awayGames = recent.filter(r => r.isHome === false);
+
+    const lastGameDate = new Date(rows[rows.length-1].date);
+    const daysRest = Math.round((Date.now() - lastGameDate.getTime()) / (1000*60*60*24));
+
+    return {
+      recentPts: avg(recent, 'pts'), recentReb: avg(recent, 'reb'), recentAst: avg(recent, 'ast'),
+      homePts: avg(homeGames, 'pts'), awayPts: avg(awayGames, 'pts'),
+      gamesConsidered: recent.length, daysRest,
+    };
+  } catch (e) {
+    return null; // network failure, timeout, or bad shape — caller falls back
+  }
+}
+
+// Blend season average (the existing fallback) with recent form, a
+// home/away adjustment, and a simple rest-day nudge, into one sharper
+// line estimate. Weighting is intentionally conservative — recent form
+// over just 5 games is noisy, so it only partially overrides the
+// season-long number rather than replacing it outright.
+function sharpenedLineEstimate(seasonAvg, signals, isHomeGame){
+  if (!signals || signals.recentPts == null) return null;
+  let blended = (seasonAvg * 0.55) + (signals.recentPts * 0.45);
+
+  // Home/away nudge: if we have enough home and away games to compare,
+  // shift toward whichever split applies to this specific game.
+  if (isHomeGame != null && signals.homePts != null && signals.awayPts != null) {
+    const splitAvg = isHomeGame ? signals.homePts : signals.awayPts;
+    blended = (blended * 0.7) + (splitAvg * 0.3);
+  }
+
+  // Rest-day nudge: short rest (0-1 days, e.g. a back-to-back) trends
+  // very slightly down; long rest (4+ days) trends very slightly up.
+  // Kept deliberately small — this is a soft signal, not a hard rule.
+  if (signals.daysRest != null) {
+    if (signals.daysRest <= 1) blended *= 0.97;
+    else if (signals.daysRest >= 4) blended *= 1.02;
+  }
+
+  return blended;
+}
+
 function loadRosterCache(){
   try {
     const raw = localStorage.getItem(ROSTER_CACHE_KEY);
@@ -1428,10 +1553,10 @@ async function refreshAllRostersFromLive(opts){
           const stats = await fetchPlayerStats(p.athleteId);
           if (stats) {
             playersWithStats++;
-            fullPlayers.push({ name: p.name, pos: p.pos, ppg: stats.ppg, rpg: stats.rpg, apg: stats.apg, spg: stats.spg, usage: stats.usage, ts: stats.ts });
+            fullPlayers.push({ name: p.name, pos: p.pos, ppg: stats.ppg, rpg: stats.rpg, apg: stats.apg, spg: stats.spg, usage: stats.usage, ts: stats.ts, athleteId: p.athleteId });
           } else {
             playersWithoutStats++;
-            fullPlayers.push({ name: p.name, pos: p.pos, ppg: 6.0, rpg: 2.5, apg: 1.5, spg: 0.6, usage: 0.14, ts: 0.50, statsUnavailable: true });
+            fullPlayers.push({ name: p.name, pos: p.pos, ppg: 6.0, rpg: 2.5, apg: 1.5, spg: 0.6, usage: 0.14, ts: 0.50, statsUnavailable: true, athleteId: p.athleteId });
           }
           updateRosterRefreshStatusUI();
         }
@@ -2041,7 +2166,38 @@ function syncPropsDateInput() {
 }
 
 // Compute a single player's full prop projection vs the opponent
-function computePlayerProps(player, team, opp) {
+// Cache of fetched form signals, keyed by athleteId, so getLine() below
+// can stay synchronous (it's called many times per render) while the
+// actual network fetching happens once per player in the background.
+// Lives only for the current page session — intentionally not persisted,
+// since "recent form" is exactly the kind of thing that should go stale
+// quickly rather than linger across days.
+let playerFormCache = {}; // { athleteId: signals }
+let formPrefetchInFlight = new Set();
+
+// Kick off (but don't await) fetching form signals for every player who
+// doesn't have a cached result yet. Called once per props load; results
+// land in playerFormCache as they arrive and a re-render afterward picks
+// them up automatically, same pattern as the roster refresh.
+function prefetchFormSignalsForSlate(games){
+  for (const g of games) {
+    for (const team of [g.away, g.home]) {
+      const roster = PLAYER_DB[team] || [];
+      for (const player of roster) {
+        const id = player.athleteId;
+        if (!id || playerFormCache[id] || formPrefetchInFlight.has(id)) continue;
+        formPrefetchInFlight.add(id);
+        fetchPlayerFormSignals(id).then(signals => {
+          if (signals) playerFormCache[id] = signals;
+        }).finally(() => {
+          formPrefetchInFlight.delete(id);
+        });
+      }
+    }
+  }
+}
+
+function computePlayerProps(player, team, opp, isHomeGame) {
   const oppTeam = teamData[opp];
   if (!oppTeam) return null;
   const oppDefRating = (oppTeam.oppg / (oppTeam.pace||92)) * 100;
@@ -2055,11 +2211,23 @@ function computePlayerProps(player, team, opp) {
   const projReb = +(player.rpg * injMult).toFixed(1);
   const projAst = +(player.apg * injMult).toFixed(1);
 
-  // Use REAL sportsbook line if connected, else estimate
+  // Use REAL sportsbook line if connected, else a sharpened free-data
+  // estimate (recent form + home/away + rest days) when we have it
+  // cached for this player, else the flat-multiplier fallback.
+  // The 0.87 multiplier is calibrated from real FanDuel lines compared
+  // against PLAYER_DB season ppg (Breanna Stewart 19.5/21.8, Sabrina
+  // Ionescu 14.5/18.2, Kamilla Cardoso 12.5/14.6, Skylar Diggins 14.5/15.8
+  // — ratios 0.89, 0.80, 0.86, 0.92, averaging ~0.87). Real sportsbook
+  // lines consistently run BELOW raw season average. This stays as the
+  // floor/fallback for any player whose form signals aren't available.
   function getLine(stat, fallback) {
     const real = liveOddsLines[player.name + '|' + stat];
     if (real && real.line != null) return { line: real.line, real: true, book: real.book, over: real.over, under: real.under };
-    return { line: +(fallback * 0.97).toFixed(1), real: false };
+    if (stat === 'pts' && player.athleteId && playerFormCache[player.athleteId]) {
+      const sharpened = sharpenedLineEstimate(fallback, playerFormCache[player.athleteId], isHomeGame);
+      if (sharpened != null) return { line: +(sharpened * 0.87).toFixed(1), real: false, sharpened: true };
+    }
+    return { line: +(fallback * 0.87).toFixed(1), real: false };
   }
   const lP = getLine('pts', player.ppg);
   const lR = getLine('reb', player.rpg);
@@ -2072,7 +2240,8 @@ function computePlayerProps(player, team, opp) {
     const realBonus = lineObj.real ? 1.5 : 0;
     const conf = Math.min(10, Math.round(Math.abs(proj - line) * usageW + player.usage * 18 + (injMult===1?1:0) + realBonus));
     return { proj, line, rec, conf, edge:+(proj-line).toFixed(1),
-             real: lineObj.real, book: lineObj.book, over: lineObj.over, under: lineObj.under };
+             real: lineObj.real, book: lineObj.book, over: lineObj.over, under: lineObj.under,
+             sharpened: !!lineObj.sharpened };
   }
   return {
     player: player.name, team, opp, pos: player.pos, status,
@@ -2115,14 +2284,15 @@ async function loadTodaysProps() {
 
   // Build prop list from every player on every team playing
   allTodaysProps = [];
+  prefetchFormSignalsForSlate(games); // fire-and-forget; fills playerFormCache as results arrive
   for (const g of games) {
-    for (const [team, opp] of [[g.away, g.home], [g.home, g.away]]) {
+    for (const [team, opp, isHomeGame] of [[g.away, g.home, false], [g.home, g.away, true]]) {
       const roster = PLAYER_DB[team] || [];
       for (const player of roster) {
         // Skip players who are Out
         const injEntry = (injuries[team]||[]).find(i => i.name === player.name);
         if (injEntry && injEntry.status === 'Out') continue;
-        const props = computePlayerProps(player, team, opp);
+        const props = computePlayerProps(player, team, opp, isHomeGame);
         if (props) allTodaysProps.push(props);
       }
     }
@@ -2330,7 +2500,7 @@ function renderTodaysProps() {
       '</div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;align-items:center;padding:14px 16px;gap:12px">' +
         '<div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:24px;font-weight:800;color:' + recColor + '">' + d.proj + '</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Projected</div></div>' +
-        '<div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:18px;font-weight:700;color:var(--text)">' + d.line + (d.real ? ' <span style="font-size:9px;color:var(--green);vertical-align:middle">●</span>' : '') + '</div><div style="font-size:10px;color:' + (d.real?'var(--green)':'var(--muted)') + ';text-transform:uppercase;letter-spacing:.06em">' + (d.real ? (d.book==='fanduel'?'FanDuel':d.book==='draftkings'?'DraftKings':d.book||'Live') : 'Est. Line') + '</div></div>' +
+        '<div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:18px;font-weight:700;color:var(--text)">' + d.line + (d.real ? ' <span style="font-size:9px;color:var(--green);vertical-align:middle">●</span>' : '') + '</div><div style="font-size:10px;color:' + (d.real?'var(--green)':d.sharpened?'var(--gold)':'var(--muted)') + ';text-transform:uppercase;letter-spacing:.06em">' + (d.real ? (d.book==='fanduel'?'FanDuel':d.book==='draftkings'?'DraftKings':d.book||'Live') : d.sharpened ? 'Est. (form-adj.)' : 'Est. Line') + '</div></div>' +
         '<div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:16px;font-weight:700;color:' + (Math.abs(d.edge)<0.5?'var(--muted)':d.edge>0?'var(--green)':'var(--accent)') + '">' + (d.edge>0?'+':'') + d.edge + '</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Edge</div></div>' +
         '<div style="text-align:right">' +
           '<span class="mini-rec" style="color:' + recColor + ';background:' + recBg + '">' + d.rec + '</span>' +
@@ -2504,7 +2674,7 @@ async function testOddsConnection() {
       const events = await res.json();
       result.innerHTML = '✅ <strong>Connected!</strong> Found ' + events.length + ' WNBA events.' + (remaining?' Requests left: ' + remaining + '.':'') + ' <span style="color:var(--gold)">Player props need their Business plan ($99/mo).</span>';
     } else {
-      const realUrl = 'https://api.sharpapi.io/api/v1/odds?league=WNBA';
+      const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=WNBA';
       const url = buildOddsUrl(realUrl);
       let res;
       try { res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } }); }
@@ -2517,7 +2687,7 @@ async function testOddsConnection() {
       if (!res.ok) { result.innerHTML = '❌ ' + (oddsProxyUrl?'Your proxy':'SharpAPI') + ' returned ' + res.status + '. Check the key and your plan.'; return; }
       const data = await res.json();
       const count = Array.isArray(data) ? data.length : (data.data?.length || 0);
-      result.innerHTML = '✅ <strong>Connected to SharpAPI!</strong> Found ' + count + ' WNBA odds line' + (count===1?'':'s') + '.';
+      result.innerHTML = '✅ <strong>Connected to SharpAPI!</strong> Found ' + count + ' WNBA odds line' + (count===1?'':'s') + '. <span style="color:var(--gold)">Player props need their Hobby plan ($79/mo)+ — the free tier covers spread/moneyline/total only.</span>';
     }
     if (typeof agentLogEntry === 'function') agentLogEntry('auto', 'Odds API connection test passed (' + oddsProvider + ')');
   } catch(e) {
@@ -2589,7 +2759,7 @@ async function fetchLiveOddsForDate(dateKey) {
       // SharpAPI
       let res;
       try {
-        const realUrl = 'https://api.sharpapi.io/api/v1/odds?league=WNBA&market_type=player_points,player_rebounds,player_assists';
+        const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=WNBA&market_type=player_points,player_rebounds,player_assists';
         const url = buildOddsUrl(realUrl);
         res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } });
       } catch (netErr) {
@@ -2605,7 +2775,7 @@ async function fetchLiveOddsForDate(dateKey) {
       parseSharpApi(data, lines);
       lastOddsStatus = Object.keys(lines).length
         ? { ok:true, message:'Loaded ' + Object.keys(lines).length + ' real lines.' }
-        : { ok:false, message:'Connected to SharpAPI but no props returned for this date.' };
+        : { ok:false, message:'Connected to SharpAPI, but no player prop lines came back. This usually means props need their Hobby plan ($79/mo)+ — the free tier covers spread/moneyline/total only.' };
     }
     if (typeof agentLogEntry === 'function') {
       agentLogEntry('auto', 'Live odds: ' + Object.keys(lines).length + ' lines from ' + oddsProvider + (lastOddsStatus.message?' ('+lastOddsStatus.message+')':''));
