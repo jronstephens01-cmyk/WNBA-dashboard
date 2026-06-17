@@ -1742,6 +1742,38 @@ if(!injuries){
     injuries[team]=players.map(p=>({name:p.name,status:'Healthy',impact:0}));
   }
 }
+
+// ── REAL INJURY REPORT IMPORT (one-time merge) ──
+// User-uploaded injury report, cross-referenced against PLAYER_DB. Only the
+// 10 players who are actually tracked in PLAYER_DB got applied — the other
+// 40 in the source report are real players, but PLAYER_DB intentionally only
+// carries a curated handful of top players per team, not a full roster, so
+// they have nowhere to go without a separate decision to expand that list.
+// Tagged with a version key so this merge runs exactly once: it updates
+// these specific entries' status now, but never re-stomps them (or any
+// other manual edit made via the injury editor UI) on a later page load.
+const INJURY_IMPORT_VERSION = 'v1_2026_06_17';
+if (localStorage.getItem('wnba_injury_import_version') !== INJURY_IMPORT_VERSION) {
+  const REAL_INJURY_REPORT = [
+    {name:'Julie Allemand', team:'Toronto Tempo', status:'Day-to-Day'},
+    {name:'Shakira Austin', team:'Washington Mystics', status:'Out'},
+    {name:'Caitlin Clark', team:'Indiana Fever', status:'Day-to-Day'},
+    {name:'Napheesa Collier', team:'Minnesota Lynx', status:'Out'},
+    {name:'Jordan Horston', team:'Seattle Storm', status:'Out'},
+    {name:'Kiki Iriafen', team:'Washington Mystics', status:'Out'},
+    {name:'Brionna Jones', team:'Atlanta Dream', status:'Out'},
+    {name:'Jewell Loyd', team:'Las Vegas Aces', status:'Day-to-Day'},
+    {name:'Kelsey Plum', team:'Los Angeles Sparks', status:'Day-to-Day'},
+    {name:'Nyara Sabally', team:'Toronto Tempo', status:'Day-to-Day'},
+  ];
+  for (const entry of REAL_INJURY_REPORT) {
+    if (!injuries[entry.team]) continue;
+    const player = injuries[entry.team].find(p => p.name === entry.name);
+    if (player) { player.status = entry.status; player.impact = IMPACT_MAP[entry.status] || 0; }
+  }
+  localStorage.setItem('wnba_injuries', JSON.stringify(injuries));
+  localStorage.setItem('wnba_injury_import_version', INJURY_IMPORT_VERSION);
+}
 let deferredInstall=null;
 
 // ════ H2H ════
