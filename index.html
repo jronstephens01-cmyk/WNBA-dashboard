@@ -3212,7 +3212,17 @@ async function fetchBoxscoreStats(eventId) {
   if (!eventId) return stats;
   try {
     const url = 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=' + eventId;
-    const res = await fetchWithTimeout(url, { mode:'cors' });
+    // The real summary response is large (full per-player box score stats for
+    // both teams, plus video/news/odds metadata bundled in) — confirmed via a
+    // live response that ran well over 100KB. The default 5s timeout used
+    // elsewhere was tuned for the much smaller scoreboard endpoint; on a real
+    // connection this much larger payload was very likely timing out
+    // silently (caught below, returning {}), which would leave every prop
+    // permanently "pending" while the game's own final score — fetched
+    // separately via the small, fast scoreboard endpoint — still displayed
+    // correctly. That mismatch is consistent with auto-verify looking like
+    // it only ever updates game results, never props.
+    const res = await fetchWithTimeout(url, { mode:'cors' }, 15000);
     if (!res.ok) return stats;
     const data = await res.json();
     const teams = data.boxscore?.players || [];
@@ -3293,13 +3303,17 @@ async function autoVerifyHistoryDay(dateKey) {
 
   // Fetch box scores for every completed game on this date (parallel)
   let allStats = {};
+  const failedGames = [];
   await Promise.all(completedGames.map(async g => {
     const stats = await fetchBoxscoreStats(g.espnEventId);
+    if (!Object.keys(stats).length) {
+      failedGames.push((g.away || '?') + ' @ ' + (g.home || '?'));
+    }
     Object.assign(allStats, stats);
   }));
 
   if (!Object.keys(allStats).length) {
-    if (statusEl) statusEl.innerHTML = '⚠️ Games are marked final but ESPN hasn\'t published box scores yet. Try again in a few minutes.';
+    if (statusEl) statusEl.innerHTML = '⚠️ Games are marked final but ESPN hasn\'t published box scores yet, or the box score fetch failed for all ' + completedGames.length + ' game(s) (possibly a slow connection — these responses are large). Try again in a few minutes.';
     return;
   }
 
@@ -3343,9 +3357,10 @@ async function autoVerifyHistoryDay(dateKey) {
 
   if (statusEl) {
     const voidNote = voided > 0 ? ' ' + voided + ' voided (DNP or push).' : '';
+    const failNote = failedGames.length ? ' Couldn\'t load box score for: ' + failedGames.join(', ') + ' — try again shortly.' : '';
     statusEl.innerHTML = (graded > 0 || voided > 0)
-      ? '✅ Auto-verified ' + graded + ' prop' + (graded!==1?'s':'') + ' from ' + completedGames.length + ' final box score' + (completedGames.length>1?'s':'') + '.' + voidNote + (matched<day.props.filter(p=>p.result==='pending'||p.verifiedBy).length ? ' Some players had no matching box score entry — grade those manually below.' : '')
-      : '⚪ Box scores loaded but no name matches found. Player names may differ slightly between sources — grade manually below.';
+      ? '✅ Auto-verified ' + graded + ' prop' + (graded!==1?'s':'') + ' from ' + (completedGames.length - failedGames.length) + ' final box score' + (completedGames.length!==1?'s':'') + '.' + voidNote + failNote + (matched<day.props.filter(p=>p.result==='pending'||p.verifiedBy).length ? ' Some players had no matching box score entry — grade those manually below.' : '')
+      : '⚪ Box scores loaded but no name matches found. Player names may differ slightly between sources — grade manually below.' + failNote;
   }
 
   if (typeof agentLogEntry === 'function') {
