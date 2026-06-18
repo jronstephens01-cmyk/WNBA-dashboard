@@ -380,6 +380,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
   <button class="nav-tab"         onclick="switchTab('props',this)">⭐ Player Props</button>
   <button class="nav-tab"         onclick="switchTab('tracker',this)">📊 My Picks</button>
   <button class="nav-tab"         onclick="switchTab('confidence',this)">🎯 Confidence</button>
+  <button class="nav-tab"         onclick="switchTab('streakbuilder',this)">🔥 Streak Builder</button>
   <button class="nav-tab"         onclick="switchTab('propshistory',this)">📅 Props History</button>
   <button class="nav-tab"         onclick="switchTab('injuries',this)">⚠️ Injuries</button>
   <button class="nav-tab"         onclick="switchTab('teams',this)">📋 Teams</button>
@@ -659,6 +660,36 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
       </div>
     </div>
   </div>
+</div></div>
+
+<!-- ══ STREAK BUILDER ══ -->
+<div class="tab-page" id="tab-streakbuilder"><div class="page">
+  <div class="section-label">🔥 Streak Builder</div>
+  <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">Every high-confidence pick for today's slate, player props and game-level Margin of Victory together, ranked by the model's own confidence. Built for picking Underdog Streak legs — Higher/Lower direction maps directly onto the model's OVER/UNDER call.</p>
+
+  <div class="card" style="padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <div style="flex:1;min-width:160px">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Min. confidence</label>
+      <select id="streak-min-conf" onchange="renderStreakBuilder()" style="width:100%">
+        <option value="7">7+ (default)</option>
+        <option value="6">6+</option>
+        <option value="8">8+</option>
+        <option value="9">9+</option>
+      </select>
+    </div>
+    <div style="flex:1;min-width:160px">
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Show</label>
+      <select id="streak-type-filter" onchange="renderStreakBuilder()" style="width:100%">
+        <option value="all">Props + Game Picks</option>
+        <option value="props">Props Only</option>
+        <option value="games">Game Picks Only</option>
+      </select>
+    </div>
+    <button class="btn btn-purple" style="padding:8px 16px;align-self:flex-end" onclick="renderStreakBuilder()">↻ Refresh</button>
+  </div>
+
+  <div id="streak-builder-status" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>
+  <div id="streak-builder-list"></div>
 </div></div>
 
 <!-- ══ PROPS HISTORY ══ -->
@@ -2159,6 +2190,7 @@ function injuryPointPenalty(teamName){
 let propsDate = '6/14/2026';
 let propFilters = { pts:true, reb:true, ast:true };
 let allTodaysProps = []; // computed prop objects
+let propsLoadedThisSession = false; // distinguishes "never loaded yet" from "loaded, genuinely zero results" — needed by Streak Builder's empty-state logic
 
 function togglePropFilter(stat) {
   propFilters[stat] = !propFilters[stat];
@@ -2383,6 +2415,7 @@ async function loadTodaysProps() {
   renderPickOfTheDay();
   renderTodaysProps();
   snapshotPropsForHistory(propsForSnapshot); // auto-log every prop offered today (or that day, if viewing a past date), locked or not
+  propsLoadedThisSession = true;
 }
 
 function showOddsStatusBanner() {
@@ -3025,6 +3058,134 @@ async function gradeAllPending(result) {
 }
 
 // ── Render the day view ──
+// ════ STREAK BUILDER ════
+// Unifies today's high-confidence PLAYER PROPS (from allTodaysProps, same
+// model output as the Player Props tab) and GAME-LEVEL picks (from
+// predictions, the same Margin-of-Victory-style output used by Pick of the
+// Day) into one ranked list, framed in Underdog Streak's Higher/Lower
+// language. Confidence is compared on a common 0-10 scale: props already
+// use 0-10 conf; game picks use aiRating, which is winProb*10 on the same
+// scale (50% win prob -> 5.0, 90% -> 9.0), so the two are directly
+// comparable without any rescaling.
+function buildStreakCandidates() {
+  const candidates = [];
+
+  // Player props: flatten allTodaysProps the same way snapshotPropsForHistory
+  // does, but keep PASS recommendations out entirely — a "no clear edge"
+  // prop is never a good Streak leg regardless of confidence number.
+  for (const p of allTodaysProps) {
+    for (const stat of ['pts', 'reb', 'ast']) {
+      const d = p[stat];
+      if (!d || d.rec === 'PASS') continue;
+      candidates.push({
+        kind: 'prop',
+        conf: d.conf,
+        player: p.player, team: p.team, opp: p.opp,
+        statName: stat === 'pts' ? 'Points' : stat === 'reb' ? 'Rebounds' : 'Assists',
+        line: d.line, proj: d.proj,
+        direction: d.rec === 'OVER' ? 'Higher' : 'Lower',
+        real: d.real, book: d.book,
+        edge: +(Math.abs(d.proj - d.line)).toFixed(1),
+      });
+    }
+  }
+
+  // Game-level picks: today's predictions, framed as a Margin of Victory
+  // call on the favored team (matching how Underdog's own MoV market
+  // works — pick a side of the spread, not an exact final score).
+  const todayKey = dateToKey(new Date());
+  for (const pr of predictions) {
+    if (pr.scheduleDate !== todayKey) continue; // only today's real slate, not one-off custom matchups
+    const favoriteTeam = pr.winner === 'home' ? pr.homeTeam : pr.awayTeam;
+    const dogTeam = pr.winner === 'home' ? pr.awayTeam : pr.homeTeam;
+    candidates.push({
+      kind: 'game',
+      conf: pr.aiRating,
+      matchup: pr.awayTeam + ' @ ' + pr.homeTeam,
+      favoriteTeam, dogTeam,
+      spread: pr.spread,
+      winProb: pr.winProb,
+    });
+  }
+
+  return candidates;
+}
+
+function renderStreakBuilder() {
+  const statusEl = document.getElementById('streak-builder-status');
+  const listEl = document.getElementById('streak-builder-list');
+  const minConf = parseFloat(document.getElementById('streak-min-conf')?.value || '7');
+  const typeFilter = document.getElementById('streak-type-filter')?.value || 'all';
+
+  if (!propsLoadedThisSession && typeFilter !== 'games') {
+    // Player Props hasn't been loaded yet this session — load it so props
+    // can actually appear here, same lazy-load pattern used by the Player
+    // Props tab itself. Once loaded (even if zero props came back), this
+    // flag flips and we fall through to the real empty-state message below
+    // instead of looping back into another load.
+    loadTodaysProps().then(() => renderStreakBuilder());
+    if (statusEl) statusEl.innerHTML = '⏳ Loading today\'s props…';
+    return;
+  }
+
+  let candidates = buildStreakCandidates().filter(c => c.conf >= minConf);
+  if (typeFilter === 'props') candidates = candidates.filter(c => c.kind === 'prop');
+  if (typeFilter === 'games') candidates = candidates.filter(c => c.kind === 'game');
+
+  // Highest confidence first; ties broken by larger edge (props) so a
+  // bigger gap between projection and line ranks slightly higher among
+  // equal-confidence options.
+  candidates.sort((a, b) => (b.conf - a.conf) || ((b.edge || 0) - (a.edge || 0)));
+
+  if (statusEl) {
+    statusEl.innerHTML = candidates.length
+      ? 'Showing ' + candidates.length + ' pick' + (candidates.length !== 1 ? 's' : '') + ' at ' + minConf + '+ confidence.'
+      : 'No picks at ' + minConf + '+ confidence right now — try lowering the minimum, or check back closer to game time once injury/lineup info firms up.';
+  }
+
+  if (!candidates.length) { listEl.innerHTML = ''; return; }
+
+  listEl.innerHTML = candidates.slice(0, 10).map((c, i) => {
+    const confColor = c.conf >= 9 ? 'var(--green)' : c.conf >= 7.5 ? 'var(--gold)' : 'var(--muted)';
+    const rankBadge = '<span style="font-family:\'Barlow Condensed\',sans-serif;font-weight:800;font-size:13px;color:var(--muted);min-width:28px;display:inline-block">#' + (i + 1) + '</span>';
+
+    if (c.kind === 'prop') {
+      const lineSrc = c.real ? (c.book || 'real line') : 'model est.';
+      return '<div class="card" style="padding:14px 18px;margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;border-left:3px solid ' + confColor + '">' +
+        rankBadge +
+        '<div style="flex:1;min-width:220px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:15px;font-weight:800;color:var(--text)">' + c.player + ' — ' + c.statName + '</div>' +
+          '<div style="font-size:12px;color:var(--muted);margin-top:2px">' + c.team + ' vs ' + c.opp + ' · line ' + c.line + ' (' + lineSrc + ') · proj ' + c.proj + '</div>' +
+        '</div>' +
+        '<div style="text-align:center;min-width:90px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:18px;font-weight:800;color:' + (c.direction === 'Higher' ? 'var(--green)' : 'var(--accent)') + '">' + c.direction + '</div>' +
+          '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">streak pick</div>' +
+        '</div>' +
+        '<div style="text-align:right;min-width:70px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:18px;font-weight:800;color:' + confColor + '">' + c.conf + '/10</div>' +
+          '<div style="font-size:10px;color:var(--muted)">edge ' + c.edge + '</div>' +
+        '</div>' +
+      '</div>';
+    } else {
+      return '<div class="card" style="padding:14px 18px;margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;border-left:3px solid ' + confColor + '">' +
+        rankBadge +
+        '<div style="flex:1;min-width:220px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:15px;font-weight:800;color:var(--text)">' + c.matchup + '</div>' +
+          '<div style="font-size:12px;color:var(--muted);margin-top:2px">Margin of Victory · ' + c.winProb + '% win probability · proj. margin ' + c.spread + ' pts</div>' +
+        '</div>' +
+        '<div style="text-align:center;min-width:140px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:16px;font-weight:800;color:var(--purple)">' + c.favoriteTeam + ' -' + c.spread + '</div>' +
+          '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">game pick</div>' +
+        '</div>' +
+        '<div style="text-align:right;min-width:70px">' +
+          '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:18px;font-weight:800;color:' + confColor + '">' + c.conf + '/10</div>' +
+          '<div style="font-size:10px;color:var(--muted)">win prob</div>' +
+        '</div>' +
+      '</div>';
+    }
+  }).join('');
+}
+
 function renderHistoryDay() {
   syncHistoryDateInput();
   const day = propsHistory[historyViewDate];
@@ -3909,6 +4070,7 @@ function switchTab(name,el){
   if(name==='agent'){ runAgentCycle(false); }
   if(name==='props'){ if(!allTodaysProps.length) loadTodaysProps(); }
   if(name==='propshistory'){ renderHistoryDay(); }
+  if(name==='streakbuilder'){ renderStreakBuilder(); }
 }
 
 // ════ DROPDOWNS ════
