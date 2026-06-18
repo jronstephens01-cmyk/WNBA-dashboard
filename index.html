@@ -3620,21 +3620,44 @@ function renderConfidence(){
   const wr=wins/total;
 
   const gamePicks=settled.filter(p=>p.type!=='prop');
-  const propPicks=settled.filter(p=>p.type==='prop');
   const gwins=gamePicks.filter(p=>p.result==='win').length;
-  const pwins=propPicks.filter(p=>p.result==='win').length;
 
-  // High conf picks (AI rating >=7)
+  // Prop Pick Accuracy now pulls from the REAL auto-graded propsHistory data
+  // (every prop ever offered, win/loss/void across all logged days) instead
+  // of only the much smaller manual "My Picks" log. Props History is the
+  // actual source of truth for prop results now that auto-verify against
+  // ESPN box scores is working — the old manual-picks-only version stayed
+  // blank/tiny because almost nobody manually re-logs every prop they saw
+  // in a separate tracker. Void results are excluded from the rate (same
+  // convention as the Props History tab's own hit-rate calculation).
+  let allGradedProps = [];
+  for (const day of Object.values(propsHistory)) {
+    allGradedProps.push(...day.props.filter(p => p.result === 'win' || p.result === 'loss'));
+  }
+  const propWins = allGradedProps.filter(p => p.result === 'win').length;
+  const propTotal = allGradedProps.length;
+
+  // High-confidence PROPS specifically (conf >=7 on the same 0-10 scale
+  // used for game picks), pulled from this same real dataset.
+  const highConfProps = allGradedProps.filter(p => p.conf >= 7);
+  const hcPropWins = highConfProps.filter(p => p.result === 'win').length;
+
+  // High conf picks (AI rating >=7) — still from manual My Picks (game picks)
   const highConf=settled.filter(p=>p.aiRating>=7);
   const hcWins=highConf.filter(p=>p.result==='win').length;
+
+  // Combined picks-logged count: manual My Picks entries + real graded props,
+  // since "how much real data has this model accumulated" should reflect
+  // both sources now, not just the smaller manual log.
+  const combinedLoggedCount = picks.length + propTotal;
 
   const items=[
     {label:'Overall Win Rate',val:settled.length?Math.round(wr*100)+'%':'—',num:wr,color:'var(--green)'},
     {label:'Game Pick Accuracy',val:gamePicks.length?Math.round(gwins/gamePicks.length*100)+'%':'—',num:gamePicks.length?gwins/gamePicks.length:0,color:'var(--blue)'},
-    {label:'Prop Pick Accuracy',val:propPicks.length?Math.round(pwins/propPicks.length*100)+'%':'—',num:propPicks.length?pwins/propPicks.length:0,color:'var(--purple)'},
-    {label:'High Conf Picks (7+)',val:highConf.length?Math.round(hcWins/highConf.length*100)+'%':'—',num:highConf.length?hcWins/highConf.length:0,color:'var(--gold)'},
-    {label:'Picks Logged',val:picks.length,num:Math.min(picks.length/50,1),color:'var(--accent)'},
-    {label:'Model Reliability',val:picks.length>=50?'High':picks.length>=20?'Medium':'Building…',num:Math.min(picks.length/50,1),color:'var(--green)'},
+    {label:'Prop Pick Accuracy',val:propTotal?Math.round(propWins/propTotal*100)+'%':'—',num:propTotal?propWins/propTotal:0,color:'var(--purple)'},
+    {label:'High Conf Props (7+)',val:highConfProps.length?Math.round(hcPropWins/highConfProps.length*100)+'%':'—',num:highConfProps.length?hcPropWins/highConfProps.length:0,color:'var(--gold)'},
+    {label:'Picks Logged',val:combinedLoggedCount,num:Math.min(combinedLoggedCount/50,1),color:'var(--accent)'},
+    {label:'Model Reliability',val:combinedLoggedCount>=50?'High':combinedLoggedCount>=20?'Medium':'Building…',num:Math.min(combinedLoggedCount/50,1),color:'var(--green)'},
   ];
 
   grid.innerHTML=items.map(item=>`
