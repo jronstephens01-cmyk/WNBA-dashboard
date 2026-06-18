@@ -2344,9 +2344,11 @@ async function loadTodaysProps() {
   // Fetch REAL sportsbook lines if a key is connected
   if (oddsApiKey) {
     if (badge) badge.innerHTML = '⏳ Loading live odds…';
+    liveTotalsLines = {};
     liveOddsLines = await fetchLiveOddsForDate(propsDate);
   } else {
     liveOddsLines = {};
+    liveTotalsLines = {};
   }
 
   // Build prop list from every player on every UPCOMING game (used for the
@@ -2636,9 +2638,17 @@ function savePropFromAuto(player, rec, line, statName, conf) {
 // Supports The Odds API and SharpAPI. Key stored locally.
 // Pulls live FanDuel + DraftKings player prop lines.
 // ════════════════════════════════════════════════════
-let oddsProvider = localStorage.getItem('wnba_odds_provider') || 'theoddsapi';
-let oddsApiKey = localStorage.getItem('wnba_odds_key') || '';
-let oddsProxyUrl = localStorage.getItem('wnba_odds_proxy') || '';
+let oddsProvider = localStorage.getItem('wnba_odds_provider') || 'sharpapi';
+// Defaults below point at the shared Cloudflare Worker proxy, which now
+// injects the real API key itself server-side (see worker.js) rather than
+// trusting whatever the browser sends. This means every visitor — including
+// friends who never open Settings — automatically gets real odds through
+// the one shared connection. The placeholder key value is never actually
+// used by SharpAPI/The Odds API; the worker substitutes its own secret
+// before forwarding the request, so this string only exists to make the
+// dashboard's existing "if (oddsApiKey)" checks fire for everyone by default.
+let oddsApiKey = localStorage.getItem('wnba_odds_key') || 'shared-via-proxy';
+let oddsProxyUrl = localStorage.getItem('wnba_odds_proxy') || 'https://wnba-odds-proxy.jronstephens01.workers.dev';
 
 // Sportsbook odds APIs block direct browser requests (CORS). If the user has
 // deployed the included Cloudflare Worker proxy and saved its URL, route every
@@ -2673,6 +2683,7 @@ function describeProxyError(err, proxyUrl) {
   return '⚠️ <strong>Browser blocked the request (CORS).</strong> This provider can\'t be called directly from a browser — it needs a server-side proxy. Your model estimates still work.';
 }
 let liveOddsLines = {}; // { 'playername|stat': { line, over, under, book } }
+let liveTotalsLines = {}; // { 'AwayTeam@HomeTeam': { line, over, under, book } } — game-level totals, separate from per-player prop lines
 
 function toggleOddsPanel() {
   const panel = document.getElementById('odds-panel');
@@ -2709,10 +2720,11 @@ function saveOddsKey() {
 function clearOddsKey() {
   oddsApiKey = '';
   liveOddsLines = {};
+  liveTotalsLines = {};
   localStorage.removeItem('wnba_odds_key');
   document.getElementById('odds-api-key').value = '';
   updateOddsConnStatus();
-  document.getElementById('odds-test-result').innerHTML = 'Disconnected. Lines will use model estimates.';
+  document.getElementById('odds-test-result').innerHTML = 'Removed your personal key. On the next reload this falls back to the shared proxy connection (or model estimates if no shared proxy is configured).';
   loadTodaysProps();
 }
 
@@ -2741,9 +2753,12 @@ function clearProxyUrl() {
 function updateOddsConnStatus() {
   const el = document.getElementById('odds-conn-status');
   if (!el) return;
+  const usingSharedDefault = oddsApiKey === 'shared-via-proxy';
   if (oddsApiKey) {
-    const proxyNote = oddsProxyUrl ? ' (via your proxy)' : '';
-    el.innerHTML = '🟢 Connected to ' + (oddsProvider==='theoddsapi'?'The Odds API':'SharpAPI') + proxyNote + ' — pulling live lines';
+    const label = usingSharedDefault
+      ? '🟢 Connected via the shared proxy — pulling live lines (no key needed on your end)'
+      : '🟢 Connected to ' + (oddsProvider==='theoddsapi'?'The Odds API':'SharpAPI') + (oddsProxyUrl ? ' (via your proxy)' : '') + ' — pulling live lines';
+    el.innerHTML = label;
     el.style.color = 'var(--green)';
   } else {
     el.innerHTML = 'Not connected — using model estimates for lines';
@@ -2774,7 +2789,7 @@ async function testOddsConnection() {
       const events = await res.json();
       result.innerHTML = '✅ <strong>Connected!</strong> Found ' + events.length + ' WNBA events.' + (remaining?' Requests left: ' + remaining + '.':'') + ' <span style="color:var(--gold)">Player props need their Business plan ($99/mo).</span>';
     } else {
-      const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=WNBA';
+      const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=wnba';
       const url = buildOddsUrl(realUrl);
       let res;
       try { res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } }); }
@@ -2836,7 +2851,7 @@ async function fetchLiveOddsForDate(dateKey) {
         const realEvUrl2 = 'https://api.the-odds-api.com/v4/sports/basketball_wnba/events/' + ev.id +
           '/odds?apiKey=' + encodeURIComponent(oddsApiKey) +
           '&regions=us&oddsFormat=american&bookmakers=fanduel,draftkings' +
-          '&markets=player_points,player_rebounds,player_assists';
+          '&markets=player_points,player_rebounds,player_assists,totals';
         const evUrl2 = buildOddsUrl(realEvUrl2);
         let oRes;
         try { oRes = await fetchWithTimeout(evUrl2); } catch(e2) { continue; }
@@ -2845,7 +2860,7 @@ async function fetchLiveOddsForDate(dateKey) {
         if (!oRes.ok) continue;
         let oData;
         try { oData = await oRes.json(); } catch(e3) { continue; }
-        parseOddsApiEvent(oData, lines);
+        parseOddsApiEvent(oData, lines, ev);
       }
 
       if (Object.keys(lines).length > 0) {
@@ -2859,7 +2874,7 @@ async function fetchLiveOddsForDate(dateKey) {
       // SharpAPI
       let res;
       try {
-        const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=WNBA&market_type=player_points,player_rebounds,player_assists';
+        const realUrl = 'https://api.sharpapi.io/api/v1/odds?sport=basketball&league=wnba&market=player_points,player_rebounds,player_assists,total_points';
         const url = buildOddsUrl(realUrl);
         res = await fetchWithTimeout(url, { headers: { 'X-API-Key': oddsApiKey } });
       } catch (netErr) {
@@ -2893,11 +2908,26 @@ async function fetchLiveOddsForDate(dateKey) {
 }
 
 // Parse The Odds API event response into our line format
-function parseOddsApiEvent(event, lines) {
+function parseOddsApiEvent(event, lines, ev) {
   const statMap = { player_points:'pts', player_rebounds:'reb', player_assists:'ast' };
   for (const bm of (event.bookmakers || [])) {
     const book = bm.key; // 'fanduel' or 'draftkings'
     for (const mkt of (bm.markets || [])) {
+      if (mkt.key === 'totals') {
+        // Game-level total: outcomes are { name:'Over'|'Under', point: <line>, price: <odds> },
+        // no player name involved — keyed by matchup instead.
+        if (!ev || !ev.away_team || !ev.home_team) continue;
+        const totKey = ev.away_team + '@' + ev.home_team;
+        let totLine = null, totOver = null, totUnder = null;
+        for (const oc of (mkt.outcomes || [])) {
+          if (oc.name === 'Over') { totLine = oc.point; totOver = oc.price; }
+          else if (oc.name === 'Under') { totUnder = oc.price; }
+        }
+        if (totLine != null && (!liveTotalsLines[totKey] || book === 'fanduel')) {
+          liveTotalsLines[totKey] = { line: totLine, over: totOver, under: totUnder, book };
+        }
+        continue;
+      }
       const stat = statMap[mkt.key];
       if (!stat) continue;
       // Each outcome has: name (Over/Under), description (player name), point (line), price (odds)
@@ -2936,6 +2966,21 @@ function parseSharpApi(data, lines) {
   };
   for (const it of items) {
     const marketKey = (it.market_type || it.market || it.stat || '').toLowerCase();
+
+    if (marketKey === 'total_points' || marketKey === 'total' || marketKey === 'totals') {
+      // Game-level total: no player involved, keyed by matchup instead.
+      // Confirmed real shape: { home_team, away_team, selection:'Over'|'Under', line, odds_american, sportsbook }
+      if (!it.away_team || !it.home_team) continue;
+      const totKey = it.away_team + '@' + it.home_team;
+      const totLine = it.line ?? it.point ?? it.handicap;
+      const americanOdds = it.odds_american ?? it.odds;
+      if (totLine == null) continue;
+      if (!liveTotalsLines[totKey]) liveTotalsLines[totKey] = { line: Number(totLine), over: null, under: null, book: it.sportsbook || it.book || 'sharp' };
+      if (/over/i.test(it.selection || '')) liveTotalsLines[totKey].over = americanOdds;
+      else if (/under/i.test(it.selection || '')) liveTotalsLines[totKey].under = americanOdds;
+      continue;
+    }
+
     const stat = statMap[marketKey];
     if (!stat) continue;
     // selection is typically something like "LeBron James Over" / "... Under"
@@ -3716,6 +3761,21 @@ function onPropsTeamChange(){
 }
 
 // ════ PICKS ════
+function saveTotalPick(predId, side, line, awayTeam, homeTeam, scheduleDate, aiRating) {
+  const id = predId + '_total';
+  if (picks.find(p => p.predId === id)) { showAppAlert('Already saved!'); return; }
+  picks.unshift({
+    predId: id,
+    teamPicked: side + ' ' + line,
+    matchup: awayTeam + ' @ ' + homeTeam + ' — Total Points',
+    aiRating, type: 'total', result: 'pending', date: new Date().toLocaleDateString(),
+    totalSide: side, totalLine: line, awayTeam, homeTeam, scheduleDate: scheduleDate || null,
+  });
+  localStorage.setItem('wnba_picks', JSON.stringify(picks));
+  renderPicks();
+  showAppAlert('✅ Saved: ' + side + ' ' + line + ' (' + awayTeam + ' @ ' + homeTeam + ')\nLog the result in "My Picks" after the game!');
+}
+
 function savePick(predId,teamPicked,matchup,aiRating,awayTeam,homeTeam,scheduleDate){
   if(picks.find(p=>p.predId===predId)){showAppAlert('Pick already saved!');return;}
   picks.unshift({predId,teamPicked,matchup,aiRating,type:'game',result:'pending',date:new Date().toLocaleDateString(),
@@ -3747,11 +3807,11 @@ async function autoGradeMyPicks() {
   const statusEl = document.getElementById('mypicks-autograde-status');
   if (statusEl) statusEl.innerHTML = '⏳ Checking ESPN for results…';
 
-  let gradedGames = 0, gradedProps = 0, skippedNoData = 0;
+  let gradedGames = 0, gradedProps = 0, gradedTotals = 0, skippedNoData = 0;
   const dateKeysNeeded = new Set();
   for (const p of picks) {
     if (p.result !== 'pending') continue;
-    if (p.type === 'game' && p.scheduleDate) dateKeysNeeded.add(p.scheduleDate);
+    if ((p.type === 'game' || p.type === 'total') && p.scheduleDate) dateKeysNeeded.add(p.scheduleDate);
   }
 
   // Pre-fetch schedules for every distinct date we actually need, once each,
@@ -3774,6 +3834,18 @@ async function autoGradeMyPicks() {
       p.result = (p.pickedTeam === actualWinner) ? 'win' : 'loss';
       p.verifiedBy = 'espn';
       gradedGames++;
+    } else if (p.type === 'total') {
+      if (!p.scheduleDate || !p.awayTeam || !p.homeTeam || p.totalLine == null || !p.totalSide) { skippedNoData++; continue; }
+      const sched = schedules[p.scheduleDate];
+      if (!sched) { skippedNoData++; continue; }
+      const g = sched.games.find(gm => gm.away === p.awayTeam && gm.home === p.homeTeam);
+      if (!g || !g.completed || g.homeScore == null || g.awayScore == null) continue; // not final yet — stays pending
+      const actualTotal = g.homeScore + g.awayScore;
+      if (actualTotal === p.totalLine) { p.result = 'void'; } // push, same convention as props
+      else { p.result = (p.totalSide === 'OVER' ? actualTotal > p.totalLine : actualTotal < p.totalLine) ? 'win' : 'loss'; }
+      p.actualStat = actualTotal;
+      p.verifiedBy = 'espn';
+      gradedTotals++;
     } else if (p.type === 'prop') {
       if (!p.playerName || !p.statKey || !p.scheduleDate) { skippedNoData++; continue; }
       const day = propsHistory[p.scheduleDate];
@@ -3791,10 +3863,10 @@ async function autoGradeMyPicks() {
   localStorage.setItem('wnba_picks', JSON.stringify(picks));
   renderPicks();
 
-  const totalGraded = gradedGames + gradedProps;
+  const totalGraded = gradedGames + gradedProps + gradedTotals;
   if (statusEl) {
     statusEl.innerHTML = totalGraded
-      ? '✅ Auto-graded ' + totalGraded + ' pick' + (totalGraded!==1?'s':'') + ' (' + gradedGames + ' game' + (gradedGames!==1?'s':'') + ', ' + gradedProps + ' prop' + (gradedProps!==1?'s':'') + ').' + (skippedNoData ? ' ' + skippedNoData + ' older pick(s) lack the data to auto-grade — use the manual buttons for those.' : '')
+      ? '✅ Auto-graded ' + totalGraded + ' pick' + (totalGraded!==1?'s':'') + ' (' + gradedGames + ' game' + (gradedGames!==1?'s':'') + ', ' + gradedProps + ' prop' + (gradedProps!==1?'s':'') + ', ' + gradedTotals + ' total' + (gradedTotals!==1?'s':'') + ').' + (skippedNoData ? ' ' + skippedNoData + ' older pick(s) lack the data to auto-grade — use the manual buttons for those.' : '')
       : '⚪ Nothing to auto-grade yet — games may still be in progress, or remaining pending picks predate this feature and need manual grading.';
   }
 }
@@ -4052,6 +4124,24 @@ function renderCard(p){
       <span class="vl-val">${wn.split(' ').pop()} -${f.spread}</span>
       <span style="color:var(--muted);font-size:11px;margin-left:auto">Compare to your sportsbook — bet when their line is higher</span>
     </div>
+    ${(() => {
+      const totKey = p.awayTeam + '@' + p.homeTeam;
+      const totReal = liveTotalsLines[totKey];
+      const projTotal = +(p.awayTotal + p.homeTotal).toFixed(1);
+      const totLine = totReal ? totReal.line : +(projTotal * 0.985).toFixed(1); // slight shade toward the model's own number when no real line exists, same pattern as player props' fallback
+      const totLabel = totReal ? (totReal.book === 'fanduel' ? 'FanDuel' : totReal.book === 'draftkings' ? 'DraftKings' : (totReal.book || 'Live')) : 'Model estimate — no real line yet';
+      const totColor = totReal ? 'var(--green)' : 'var(--muted)';
+      return `
+    <div class="vegas-line-box" style="margin-top:8px">
+      <span class="vl-label">Total ${totReal ? '●' : ''}</span>
+      <span class="vl-val">${totLine}</span>
+      <span style="color:${totColor};font-size:11px;margin-left:6px">${totLabel}</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-green" style="font-size:11px;padding:6px 12px" onclick="saveTotalPick('${p.id}','OVER',${totLine},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}',${p.aiRating})">✅ Over ${totLine}</button>
+        <button class="btn btn-surface" style="font-size:11px;padding:6px 12px" onclick="saveTotalPick('${p.id}','UNDER',${totLine},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}',${p.aiRating})">✅ Under ${totLine}</button>
+      </div>
+    </div>`;
+    })()}
   </div>
   <div class="quarters-section">
     <div class="quarters-title">📊 Quarter-by-Quarter Projection</div>
@@ -4171,6 +4261,13 @@ function addPrediction(){
   const away=document.getElementById('away-select').value, home=document.getElementById('home-select').value;
   if(away===home){showAppAlert('Select two different teams.');return;}
   const r=predict(away,home); if(!r) return;
+  // Tag with whatever date is currently selected in the Predictions schedule
+  // strip — without this, a saved game/total pick from a custom matchup
+  // would have no scheduleDate to auto-grade against later. This may be a
+  // hypothetical matchup not on the real schedule for that date, but it's
+  // still the most sensible anchor: it's the date the person was looking
+  // at when they ran this prediction.
+  r.scheduleDate = predScheduleDate;
   predictions.unshift(r);
   document.getElementById('pred-label').style.display='flex';
   document.getElementById('predictions-container').insertAdjacentHTML('afterbegin',renderCard(r));
@@ -4299,6 +4396,11 @@ function predictFromSchedule(away, home) {
   setSelects(away, home);
   const r = predict(away, home);
   if (!r) { showAppAlert('Missing data for this matchup.'); return; }
+  // Tag with the currently-active prediction date, same as the bulk
+  // "Predict All Games" path — without this, a saved game/total pick from
+  // a single matchup click would have no scheduleDate to auto-grade against
+  // later, and Pick of the Day's "today's slate" filter would also miss it.
+  r.scheduleDate = predScheduleDate;
   predictions.unshift(r);
   document.getElementById('pred-label').style.display = 'flex';
   document.getElementById('predictions-container').insertAdjacentHTML('afterbegin', renderCard(r));
