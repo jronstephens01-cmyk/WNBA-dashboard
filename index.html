@@ -2313,7 +2313,9 @@ async function loadTodaysProps() {
     liveOddsLines = {};
   }
 
-  // Build prop list from every player on every team playing
+  // Build prop list from every player on every UPCOMING game (used for the
+  // actual bettable Player Props display — betting on an already-finished
+  // game makes no sense, so completed games are correctly excluded here).
   allTodaysProps = [];
   prefetchFormSignalsForSlate(games); // fire-and-forget; fills playerFormCache as results arrive
   for (const g of games) {
@@ -2325,6 +2327,32 @@ async function loadTodaysProps() {
         if (injEntry && injEntry.status === 'Out') continue;
         const props = computePlayerProps(player, team, opp, isHomeGame);
         if (props) allTodaysProps.push(props);
+      }
+    }
+  }
+
+  // Separately, build the FULL prop list for history-snapshotting purposes,
+  // covering every game on this date regardless of completion status. This
+  // fixes a real gap: previously, snapshotPropsForHistory() only ever saw
+  // allTodaysProps (upcoming-only), so opening Player Props for a date AFTER
+  // that day's games had already finished meant `games` came back empty,
+  // allTodaysProps stayed empty, and the day silently never got recorded in
+  // Props History at all — with no error shown anywhere. The prop LINES
+  // themselves don't change retroactively just because a game finished, so
+  // it's correct to still snapshot them for history even on a past date.
+  const allGamesForSnapshot = result.games; // unfiltered — includes completed games too
+  let propsForSnapshot = allTodaysProps;
+  if (allGamesForSnapshot.length > games.length) {
+    propsForSnapshot = [];
+    for (const g of allGamesForSnapshot) {
+      for (const [team, opp, isHomeGame] of [[g.away, g.home, false], [g.home, g.away, true]]) {
+        const roster = PLAYER_DB[team] || [];
+        for (const player of roster) {
+          const injEntry = (injuries[team]||[]).find(i => i.name === player.name);
+          if (injEntry && injEntry.status === 'Out') continue;
+          const props = computePlayerProps(player, team, opp, isHomeGame);
+          if (props) propsForSnapshot.push(props);
+        }
       }
     }
   }
@@ -2354,7 +2382,7 @@ async function loadTodaysProps() {
 
   renderPickOfTheDay();
   renderTodaysProps();
-  snapshotPropsForHistory(); // auto-log every prop offered today, locked or not
+  snapshotPropsForHistory(propsForSnapshot); // auto-log every prop offered today (or that day, if viewing a past date), locked or not
 }
 
 function showOddsStatusBanner() {
@@ -2902,14 +2930,15 @@ let propsHistory = JSON.parse(localStorage.getItem('wnba_props_history') || '{}'
 let historyViewDate = dateToKey(new Date());
 
 // Called automatically every time loadTodaysProps() finishes
-function snapshotPropsForHistory() {
-  if (!allTodaysProps.length) return;
+function snapshotPropsForHistory(propsList) {
+  const sourceProps = propsList || allTodaysProps;
+  if (!sourceProps.length) return;
   const dateKey = propsDate;
   const existing = propsHistory[dateKey];
 
   // Build the flat list of individual stat-props (same shape as renderTodaysProps rows)
   const flat = [];
-  for (const p of allTodaysProps) {
+  for (const p of sourceProps) {
     for (const stat of ['pts','reb','ast']) {
       const d = p[stat];
       if (!d || d.rec === 'PASS') continue; // only store actionable props
