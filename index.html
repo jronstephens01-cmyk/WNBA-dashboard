@@ -2685,6 +2685,7 @@ function describeProxyError(err, proxyUrl) {
 }
 let liveOddsLines = {}; // { 'playername|stat': { line, over, under, book } }
 let liveTotalsLines = {}; // { 'AwayTeam@HomeTeam': { line, over, under, book } } — game-level totals, separate from per-player prop lines
+let espnTotalsLines = {}; // { 'AwayTeam@HomeTeam': { line, provider } } — real totals read directly from ESPN's own scoreboard data, a free no-key backup/primary source alongside SharpAPI/The Odds API
 
 function toggleOddsPanel() {
   const panel = document.getElementById('odds-panel');
@@ -4127,10 +4128,20 @@ function renderCard(p){
     </div>
     ${(() => {
       const totKey = p.awayTeam + '@' + p.homeTeam;
-      const totReal = liveTotalsLines[totKey];
+      const espnReal = espnTotalsLines[totKey];
+      const apiReal = liveTotalsLines[totKey];
+      // Prefer ESPN's own line first (free, no key, no rate limit, and
+      // confirmed via a real screenshot to carry totals even when
+      // SharpAPI's free tier came back empty for the same game), then
+      // fall back to SharpAPI/The Odds API, then our own model estimate.
+      const totReal = espnReal || apiReal;
       const projTotal = +(p.awayTotal + p.homeTotal).toFixed(1);
       const totLine = totReal ? totReal.line : +(projTotal * 0.985).toFixed(1); // slight shade toward the model's own number when no real line exists, same pattern as player props' fallback
-      const totLabel = totReal ? (totReal.book === 'fanduel' ? 'FanDuel' : totReal.book === 'draftkings' ? 'DraftKings' : (totReal.book || 'Live')) : 'Model estimate — no real line yet';
+      const totLabel = espnReal
+        ? (espnReal.provider || 'ESPN/DraftKings')
+        : apiReal
+          ? (apiReal.book === 'fanduel' ? 'FanDuel' : apiReal.book === 'draftkings' ? 'DraftKings' : (apiReal.book || 'Live'))
+          : 'Model estimate — no real line yet';
       const totColor = totReal ? 'var(--green)' : 'var(--muted)';
       return `
     <div class="vegas-line-box" style="margin-top:8px">
@@ -4750,13 +4761,36 @@ async function fetchScheduleForDate(dateKey) {
             (Intl.DateTimeFormat().resolvedOptions().timeZone ? '' : 'ET');
         } catch(e){}
       }
+      // ESPN's own scoreboard response includes a real sportsbook line for
+      // many games (the same data ESPN's own Gamecast page displays) — this
+      // is a free, no-key, no-rate-limit source, and was confirmed via a
+      // real screenshot to carry totals SharpAPI's free tier didn't have
+      // for the same game. comp.odds is an array (one entry per provider);
+      // take the first one, since ESPN typically only returns one.
+      const oddsEntry = (comp.odds || [])[0] || null;
+      const espnOdds = oddsEntry ? {
+        overUnder: oddsEntry.overUnder != null ? Number(oddsEntry.overUnder) : null,
+        spread: oddsEntry.spread != null ? Number(oddsEntry.spread) : null,
+        provider: oddsEntry.provider?.name || null,
+        details: oddsEntry.details || null,
+      } : null;
       return { away, home, time: timeLabel,
                completed: !!st.completed,
                awayScore: awayScore != null ? Number(awayScore) : null,
                homeScore: homeScore != null ? Number(homeScore) : null,
                status: st.description || 'Scheduled',
-               espnEventId: ev.id || null };
+               espnEventId: ev.id || null,
+               espnOdds };
     }).filter(g => g.away && g.home);
+
+    // Populate the renderCard-facing lookup with any real ESPN totals found,
+    // keyed the same way as liveTotalsLines/SharpAPI so renderCard can check
+    // all three sources with one consistent key shape.
+    for (const g of games) {
+      if (g.espnOdds && g.espnOdds.overUnder != null) {
+        espnTotalsLines[g.away + '@' + g.home] = { line: g.espnOdds.overUnder, provider: g.espnOdds.provider || 'ESPN' };
+      }
+    }
 
     const result = { games, source: 'live', fetched: Date.now() };
     scheduleCache[dateKey] = result;
