@@ -593,6 +593,10 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
     <div class="summary-card"><div class="big text-purple"id="stat-streak">—</div><div class="sub">Streak</div></div>
   </div>
   <div class="section-label">Pick history</div>
+  <div style="margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <button class="btn btn-purple" onclick="autoGradeMyPicks()">✅ Auto-Grade (check ESPN)</button>
+    <span id="mypicks-autograde-status" style="font-size:12px;color:var(--muted)"></span>
+  </div>
   <div class="card" id="picks-table">
     <div class="pick-tracker-header">
       <div class="pt-header-cell">Matchup</div><div class="pt-header-cell">Pick</div>
@@ -2607,18 +2611,22 @@ function renderTodaysProps() {
 function savePropFromAuto(player, rec, line, statName, conf) {
   const id = 'autoprop_' + player.replace(/\s/g,'') + '_' + statName + '_' + Date.now();
   if (typeof picks === 'undefined') return;
+  const statKeyMap = { 'Points':'pts', 'Rebounds':'reb', 'Assists':'ast' };
   picks.unshift({
     predId: id,
     teamPicked: player + ' ' + rec + ' ' + line + ' ' + statName,
     matchup: player + ' — ' + statName + ' Prop',
     aiRating: conf, type:'prop', result:'pending',
     date: new Date().toLocaleDateString(),
+    // Structured fields so this pick can be auto-graded later by looking up
+    // the matching, already-verified entry in Props History — same player,
+    // same stat, same day, no need to re-derive a result from scratch.
+    playerName: player, statKey: statKeyMap[statName] || statName, line, rec, scheduleDate: propsDate,
   });
   localStorage.setItem('wnba_picks', JSON.stringify(picks));
   renderPicks();
 
   // Tag this prop as locked in the daily history so it's never lost
-  const statKeyMap = { 'Points':'pts', 'Rebounds':'reb', 'Assists':'ast' };
   markHistoryPropLocked(player, statKeyMap[statName] || statName);
 
   showAppAlert('✅ Locked: ' + player + ' ' + rec + ' ' + line + ' ' + statName);
@@ -3708,9 +3716,10 @@ function onPropsTeamChange(){
 }
 
 // ════ PICKS ════
-function savePick(predId,teamPicked,matchup,aiRating){
+function savePick(predId,teamPicked,matchup,aiRating,awayTeam,homeTeam,scheduleDate){
   if(picks.find(p=>p.predId===predId)){showAppAlert('Pick already saved!');return;}
-  picks.unshift({predId,teamPicked,matchup,aiRating,type:'game',result:'pending',date:new Date().toLocaleDateString()});
+  picks.unshift({predId,teamPicked,matchup,aiRating,type:'game',result:'pending',date:new Date().toLocaleDateString(),
+    pickedTeam:teamPicked, awayTeam:awayTeam||null, homeTeam:homeTeam||null, scheduleDate:scheduleDate||null});
   localStorage.setItem('wnba_picks',JSON.stringify(picks));
   renderPicks(); showAppAlert(`✅ Saved: ${teamPicked}\nLog the result in "My Picks" after the game!`);
 }
@@ -3722,6 +3731,72 @@ function savePropPick(predId,player,rec,line,stat,conf){
   picks.unshift({predId:id,teamPicked:`${player} ${rec} ${line} ${stat}`,matchup:`${player} — ${stat} Prop`,aiRating:conf,type:'prop',result:'pending',date:new Date().toLocaleDateString()});
   localStorage.setItem('wnba_picks',JSON.stringify(picks));
   renderPicks(); showAppAlert(`✅ Prop locked: ${player} ${rec} ${line} ${stat}`);
+}
+
+// ════ AUTO-GRADE MY PICKS ════
+// Game picks: checked against real final scores via the same schedule data
+// used everywhere else (fetchScheduleForDate), comparing the picked team to
+// the actual winner. Prop picks: looked up against the matching, already
+// ESPN-verified entry in Props History for the same player/stat/date,
+// rather than re-deriving a result from scratch — Props History's own
+// auto-verify already did that work. Parlay picks and any pick missing the
+// structured fields (saved before this feature existed) are left alone for
+// manual grading, since there isn't enough stored data to safely auto-grade
+// them.
+async function autoGradeMyPicks() {
+  const statusEl = document.getElementById('mypicks-autograde-status');
+  if (statusEl) statusEl.innerHTML = '⏳ Checking ESPN for results…';
+
+  let gradedGames = 0, gradedProps = 0, skippedNoData = 0;
+  const dateKeysNeeded = new Set();
+  for (const p of picks) {
+    if (p.result !== 'pending') continue;
+    if (p.type === 'game' && p.scheduleDate) dateKeysNeeded.add(p.scheduleDate);
+  }
+
+  // Pre-fetch schedules for every distinct date we actually need, once each,
+  // rather than re-fetching per pick.
+  const schedules = {};
+  for (const dk of dateKeysNeeded) {
+    schedules[dk] = await fetchScheduleForDate(dk);
+  }
+
+  for (const p of picks) {
+    if (p.result !== 'pending') continue;
+
+    if (p.type === 'game') {
+      if (!p.scheduleDate || !p.awayTeam || !p.homeTeam) { skippedNoData++; continue; }
+      const sched = schedules[p.scheduleDate];
+      if (!sched) { skippedNoData++; continue; }
+      const g = sched.games.find(gm => gm.away === p.awayTeam && gm.home === p.homeTeam);
+      if (!g || !g.completed || g.homeScore == null || g.awayScore == null) continue; // not final yet — stays pending
+      const actualWinner = g.homeScore > g.awayScore ? g.home : g.away;
+      p.result = (p.pickedTeam === actualWinner) ? 'win' : 'loss';
+      p.verifiedBy = 'espn';
+      gradedGames++;
+    } else if (p.type === 'prop') {
+      if (!p.playerName || !p.statKey || !p.scheduleDate) { skippedNoData++; continue; }
+      const day = propsHistory[p.scheduleDate];
+      if (!day) continue;
+      const histEntry = day.props.find(h => h.player === p.playerName && h.stat === p.statKey);
+      if (!histEntry || histEntry.result === 'pending') continue; // Props History hasn't verified this one yet either
+      p.result = histEntry.result; // win / loss / void — same convention as Props History
+      p.verifiedBy = 'espn';
+      gradedProps++;
+    }
+    // type === 'parlay', or any other pick missing structured fields, is
+    // intentionally left untouched — not enough data to grade automatically.
+  }
+
+  localStorage.setItem('wnba_picks', JSON.stringify(picks));
+  renderPicks();
+
+  const totalGraded = gradedGames + gradedProps;
+  if (statusEl) {
+    statusEl.innerHTML = totalGraded
+      ? '✅ Auto-graded ' + totalGraded + ' pick' + (totalGraded!==1?'s':'') + ' (' + gradedGames + ' game' + (gradedGames!==1?'s':'') + ', ' + gradedProps + ' prop' + (gradedProps!==1?'s':'') + ').' + (skippedNoData ? ' ' + skippedNoData + ' older pick(s) lack the data to auto-grade — use the manual buttons for those.' : '')
+      : '⚪ Nothing to auto-grade yet — games may still be in progress, or remaining pending picks predate this feature and need manual grading.';
+  }
 }
 
 function setResult(predId,result){
@@ -4015,8 +4090,8 @@ function renderCard(p){
     <div class="verdict"><strong>${wn}</strong> projected to win <strong>${ws}–${ls}</strong> with a <strong>${p.winProb}%</strong> win probability (margin: ${f.spread} pts, range ${p.ciLow}–${p.ciHigh}). ${hw?`Home court (+${(2.8).toFixed(1)}) plus ${f.hOff>f.aOff?'a superior offensive rating ('+f.hOff+' vs '+f.aOff+')':'a stronger defense ('+f.hDef+' vs '+f.aDef+')'}${f.hInjPts>0?' — even after a '+f.hInjPts+'-pt injury hit':''} drive the edge.`:`On the road, ${p.awayTeam} wins on ${f.aOff>f.hOff?'offensive efficiency ('+f.aOff+' vs '+f.hOff+')':'defensive strength ('+f.aDef+' vs '+f.hDef+')'}${f.aInjPts>0?', overcoming a '+f.aInjPts+'-pt injury penalty':''}.`} ${p.winProb>=65?'<strong style="color:var(--green)">Strong edge.</strong>':p.winProb>=57?'<span style="color:var(--gold)">Lean.</span>':'<span style="color:var(--muted)">Close to a coin flip — proceed with caution.</span>'}</div>
   </div>
   <div class="pred-actions">
-    <button class="btn btn-green" onclick="savePick('${p.id}','${p.winner==='home'?p.homeTeam:p.awayTeam}','${p.awayTeam} @ ${p.homeTeam}',${p.aiRating})">✅ Save Pick: ${p.winner==='home'?p.homeTeam:p.awayTeam}</button>
-    <button class="btn btn-surface" onclick="savePick('${p.id}','${p.winner==='away'?p.homeTeam:p.awayTeam}','${p.awayTeam} @ ${p.homeTeam}',${p.aiRating})">🎯 Fade: ${p.winner==='away'?p.homeTeam:p.awayTeam}</button>
+    <button class="btn btn-green" onclick="savePick('${p.id}','${p.winner==='home'?p.homeTeam:p.awayTeam}','${p.awayTeam} @ ${p.homeTeam}',${p.aiRating},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}')">✅ Save Pick: ${p.winner==='home'?p.homeTeam:p.awayTeam}</button>
+    <button class="btn btn-surface" onclick="savePick('${p.id}','${p.winner==='away'?p.homeTeam:p.awayTeam}','${p.awayTeam} @ ${p.homeTeam}',${p.aiRating},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}')">🎯 Fade: ${p.winner==='away'?p.homeTeam:p.awayTeam}</button>
     <button class="btn btn-surface" onclick="addToShare('${p.id}')">📤 Share</button>
   </div>
 </div>`;
@@ -4064,6 +4139,7 @@ function switchTab(name,el){
   document.getElementById('tab-'+name).classList.add('active');
   if(el) el.classList.add('active');
   if(name==='injuries') renderInjuryEditor();
+  if(name==='tracker'){ autoGradeMyPicks(); }
   if(name==='confidence') renderConfidence();
   if(name==='parlay'){ fetchTodayGames(); syncCategoryToggles(); }
   if(name==='backtest'){ populateBacktestDropdowns(); renderBacktest(); }
