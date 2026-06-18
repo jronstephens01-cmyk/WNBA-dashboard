@@ -2401,6 +2401,7 @@ async function loadTodaysProps() {
   const srcTag = result.source === 'live' ? '🟢 Live' : result.source === 'manual' ? '✍️ Manual' : '⚪';
 
   const realLineCount = Object.keys(liveOddsLines).length;
+  const realTotalsCount = Object.keys(liveTotalsLines).length;
   if (badge) {
     if (realLineCount > 0) {
       badge.innerHTML = '🟢 Live FanDuel/DK lines';
@@ -2413,7 +2414,7 @@ async function loadTodaysProps() {
       badge.style.background = 'var(--surface2)'; badge.style.color = 'var(--muted)';
     }
   }
-  if (countEl) countEl.textContent = allTodaysProps.length + ' props · ' + games.length + ' game' + (games.length!==1?'s':'') + ' · ' + label + (realLineCount?' · ' + realLineCount + ' real lines':'');
+  if (countEl) countEl.textContent = allTodaysProps.length + ' props · ' + games.length + ' game' + (games.length!==1?'s':'') + ' · ' + label + (realLineCount?' · ' + realLineCount + ' real lines':'') + (realTotalsCount?' · ' + realTotalsCount + ' real total' + (realTotalsCount!==1?'s':''):' · 0 real totals found');
 
   // Show a clear status banner if we tried to fetch odds and something went wrong
   showOddsStatusBanner();
