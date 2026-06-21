@@ -777,6 +777,25 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
 <div class="tab-page" id="tab-injuries"><div class="page">
   <div class="section-label">Injury & availability editor</div>
   <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">Update before each slate. Changes immediately affect all new predictions. Check beat reporters & official team reports 1–2 hrs before tip-off.</p>
+
+  <div class="card" style="padding:16px 20px;margin-bottom:18px">
+    <div style="font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:800;color:var(--text);margin-bottom:6px">⚡ Quick Update</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">Copy the injury table text from ESPN (or any source) and paste it below, or upload a screenshot. Only players already tracked here get matched — this doesn't add new players.</p>
+
+    <textarea id="injury-paste-box" placeholder="Paste injury report text here, e.g.:&#10;Jewell Loyd  G  Jun 17  Day-To-Day  ...&#10;Kelsey Plum  G  Jun 17  Day-To-Day  ..." style="width:100%;min-height:100px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:10px;font-family:monospace;font-size:12px;margin-bottom:10px"></textarea>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-purple" onclick="parseInjuryPaste()">Parse Text</button>
+      <label class="btn btn-surface" style="cursor:pointer;margin:0">
+        📷 Upload Screenshot
+        <input type="file" accept="image/*" id="injury-photo-input" style="display:none" onchange="parseInjuryPhoto(this)">
+      </label>
+      <span id="injury-parse-status" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+
+    <div id="injury-parse-preview" style="margin-top:14px"></div>
+  </div>
+
   <div class="injury-editor-grid" id="injury-editor-grid"></div>
 </div></div>
 
@@ -4001,6 +4020,191 @@ function renderConfidence(){
 
 // ════ INJURY EDITOR ════
 function statusColor(s){return s==='Out'?'var(--accent)':s==='Questionable'?'var(--gold)':s==='Day-to-Day'?'#f97316':s==='Probable'?'var(--green)':'var(--muted)';}
+// ════ INJURY QUICK UPDATE — text paste + photo parsing ════
+// Maps loose status text variants (different casing, abbreviations) onto
+// the exact strings IMPACT_MAP expects. Order matters: check longer/more
+// specific phrases before shorter ones that could be substrings of them.
+function normalizeInjuryStatus(raw) {
+  const s = (raw || '').toLowerCase();
+  if (/out for season|out indefinitely|^out\b|\bout\)/.test(s)) return 'Out';
+  if (/day-to-day|day to day/.test(s)) return 'Day-to-Day';
+  if (/questionable/.test(s)) return 'Questionable';
+  if (/probable/.test(s)) return 'Probable';
+  if (/healthy|active|available/.test(s)) return 'Healthy';
+  return null; // unrecognized status — better to skip than guess wrong
+}
+
+// Finds a player by name across PLAYER_DB, tolerant of minor formatting
+// differences (extra whitespace, accented characters being typed plainly).
+// Only matches players already tracked — this tool updates status, it
+// never adds new players to the roster.
+function findTrackedPlayer(name) {
+  const clean = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  for (const [team, players] of Object.entries(PLAYER_DB)) {
+    for (const p of players) {
+      if (p.name.toLowerCase().replace(/\s+/g, ' ') === clean) {
+        return { team, name: p.name };
+      }
+    }
+  }
+  return null;
+}
+
+// Parses a block of injury-report text into { team, name, status, matched }
+// entries. Built against ESPN's real injuries page format (player name,
+// position, date, status like "Day-To-Day"/"Out", then a free-text
+// comment) but tolerant of some reordering, since pasted text from
+// different sources won't always line up identically.
+function parseInjuryText(text) {
+  const results = [];
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const statusWords = ['out', 'day-to-day', 'day to day', 'questionable', 'probable', 'healthy', 'active'];
+  const statusPattern = new RegExp('\\b(' + statusWords.join('|') + ')\\b', 'i');
+
+  for (const line of lines) {
+    const statusMatch = line.match(statusPattern);
+    if (!statusMatch) continue; // no recognizable status on this line — skip rather than guess
+    const status = normalizeInjuryStatus(statusMatch[1]);
+    if (!status) continue;
+
+    // The player name is virtually always the very start of the line in
+    // every real format we've seen (ESPN, RotoWire-style reports) — take
+    // everything up to the first multi-space gap or the position letter
+    // (G/F/C) as the name candidate.
+    const nameMatch = line.match(/^([A-Za-z.''\-\s]+?)(?:\s{2,}|\s+[GFC]\s|\s+[GFC]$)/);
+    const candidateName = nameMatch ? nameMatch[1].trim() : line.split(/\s{2,}/)[0].trim();
+    if (!candidateName || candidateName.length < 3) continue;
+
+    const match = findTrackedPlayer(candidateName);
+    results.push({
+      rawName: candidateName,
+      status,
+      matched: !!match,
+      team: match ? match.team : null,
+      canonicalName: match ? match.name : null,
+    });
+  }
+  return results;
+}
+
+function renderInjuryParsePreview(parsed) {
+  const el = document.getElementById('injury-parse-preview');
+  if (!parsed.length) {
+    el.innerHTML = '<div class="empty-state">No recognizable injury lines found. Make sure each line has a player name and a status word (Out, Day-To-Day, Questionable, Probable).</div>';
+    return;
+  }
+  const matched = parsed.filter(p => p.matched);
+  const unmatched = parsed.filter(p => !p.matched);
+
+  let html = '';
+  if (matched.length) {
+    html += '<div style="font-size:12px;color:var(--green);margin-bottom:6px">' + matched.length + ' tracked player' + (matched.length!==1?'s':'') + ' found — review, then apply:</div>';
+    html += '<div class="card" style="margin-bottom:10px">' + matched.map(p =>
+      '<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border)">' +
+        '<div style="flex:1;font-size:13px;color:var(--text)">' + p.canonicalName + ' <span style="color:var(--muted);font-size:11px">(' + p.team + ')</span></div>' +
+        '<div style="font-size:12px;font-weight:700;color:' + (p.status==='Out'?'var(--accent)':p.status==='Healthy'?'var(--green)':'var(--gold)') + '">' + p.status + '</div>' +
+      '</div>').join('') + '</div>';
+    html += '<button class="btn btn-green" onclick=\'applyInjuryParse(' + JSON.stringify(matched).replace(/'/g,"&#39;") + ')\'>✅ Apply ' + matched.length + ' Update' + (matched.length!==1?'s':'') + '</button>';
+  }
+  if (unmatched.length) {
+    html += '<div style="font-size:11px;color:var(--muted);margin-top:10px">Skipped (not a tracked player): ' + unmatched.map(p => p.rawName).join(', ') + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function parseInjuryPaste() {
+  const text = document.getElementById('injury-paste-box').value;
+  const statusEl = document.getElementById('injury-parse-status');
+  if (!text.trim()) { statusEl.textContent = 'Paste some text first.'; return; }
+  const parsed = parseInjuryText(text);
+  statusEl.textContent = parsed.length ? '' : 'Nothing recognized — check the format.';
+  renderInjuryParsePreview(parsed);
+}
+
+function applyInjuryParse(matched) {
+  let applied = 0;
+  for (const p of matched) {
+    const idx = injuries[p.team]?.findIndex(x => x.name === p.canonicalName);
+    if (idx == null || idx < 0) continue;
+    injuries[p.team][idx].status = p.status;
+    injuries[p.team][idx].impact = IMPACT_MAP[p.status] || 0;
+    applied++;
+  }
+  localStorage.setItem('wnba_injuries', JSON.stringify(injuries));
+  document.getElementById('injury-parse-status').textContent = '✅ Applied ' + applied + ' update' + (applied!==1?'s':'') + '.';
+  document.getElementById('injury-parse-preview').innerHTML = '';
+  document.getElementById('injury-paste-box').value = '';
+  renderInjuryEditor();
+}
+
+// Photo path: calls Claude's vision API to read the injury table out of a
+// screenshot, since there's no OCR built into the browser. This is a known
+// reliability risk — a similar live API call inside a different artifact
+// failed in this environment before — so this always offers a clear,
+// working fallback (paste the text instead) rather than leaving someone
+// stuck if the call fails or times out.
+async function parseInjuryPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const statusEl = document.getElementById('injury-parse-status');
+  statusEl.textContent = '⏳ Reading screenshot…';
+
+  try {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = () => reject(new Error('Could not read the image file.'));
+      reader.readAsDataURL(file);
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000); // don't hang forever on mobile
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: file.type || 'image/jpeg', data: base64 } },
+            { type: 'text', text: 'This is a screenshot of a WNBA injury report. List every player you can read, one per line, in exactly this format with no extra text: PlayerName | Status\nWhere Status is one of: Out, Day-to-Day, Questionable, Probable, Healthy. Only output the list, nothing else.' }
+          ]
+        }]
+      })
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) throw new Error('API returned ' + response.status);
+    const data = await response.json();
+    const textBlock = (data.content || []).find(c => c.type === 'text');
+    if (!textBlock || !textBlock.text) throw new Error('No readable text in the response.');
+
+    // Convert the AI's "Name | Status" lines into the same shape the text
+    // parser produces, then reuse the exact same matching/preview/apply path.
+    const parsed = [];
+    for (const line of textBlock.text.split('\n').map(l => l.trim()).filter(Boolean)) {
+      const parts = line.split('|').map(s => s.trim());
+      if (parts.length < 2) continue;
+      const status = normalizeInjuryStatus(parts[1]);
+      if (!status) continue;
+      const match = findTrackedPlayer(parts[0]);
+      parsed.push({ rawName: parts[0], status, matched: !!match, team: match ? match.team : null, canonicalName: match ? match.name : null });
+    }
+
+    statusEl.textContent = parsed.length ? '✅ Read ' + parsed.length + ' player(s) from the screenshot.' : 'Could not find any recognizable players in that image.';
+    renderInjuryParsePreview(parsed);
+  } catch (e) {
+    // Graceful fallback — never leave the person stuck with no path forward.
+    statusEl.innerHTML = '⚠️ Photo reading didn\'t work (' + (e.name === 'AbortError' ? 'timed out' : e.message) + '). Try pasting the text instead using the box above — it\'s more reliable anyway.';
+  } finally {
+    input.value = ''; // allow re-uploading the same file if needed
+  }
+}
+
 function renderInjuryEditor(){
   const grid=document.getElementById('injury-editor-grid');
   grid.innerHTML=Object.keys(teamData).sort().map(name=>{
