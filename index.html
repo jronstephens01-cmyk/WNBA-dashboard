@@ -1093,7 +1093,9 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">
     <button class="btn btn-accent" onclick="runAgentCycle(true)">▶ Run Full Maintenance Cycle</button>
     <button class="btn btn-surface" onclick="clearAgentLog()">🗑 Clear Activity Log</button>
+    <button class="btn btn-surface" onclick="resetScoutSchedule()" title="Clears today's run marker so SCOUT fires again next time you open the app">↺ Reset Daily Schedule</button>
   </div>
+  <div id="scout-schedule-status" style="font-size:12px;color:var(--muted);margin-bottom:16px"></div>
 
   <!-- System health -->
   <div class="section-label">System Health</div>
@@ -4449,7 +4451,7 @@ function switchTab(name,el){
   if(name==='confidence') renderConfidence();
   if(name==='parlay'){ fetchTodayGames(); syncCategoryToggles(); }
   if(name==='backtest'){ populateBacktestDropdowns(); renderBacktest(); }
-  if(name==='agent'){ runAgentCycle(false); }
+  if(name==='agent'){ runAgentCycle(false); renderAgentScheduleStatus(); }
   if(name==='props'){ if(!allTodaysProps.length) loadTodaysProps(); }
   if(name==='propshistory'){ renderHistoryDay(); }
   if(name==='streakbuilder'){ renderStreakBuilder(); }
@@ -6011,6 +6013,33 @@ function markInjuriesReviewed() {
   agentLogEntry('approved', 'Overseer reviewed injury data');
 }
 
+function resetScoutSchedule() {
+  localStorage.removeItem('wnba_scout_last_run');
+  renderAgentScheduleStatus();
+  agentLogEntry('approved', 'Overseer reset the daily schedule — SCOUT will fire on next app open at or after 9 AM ET');
+  showAppAlert('Daily schedule reset. Open the app again after 9 AM ET (or run manually above) to trigger the full morning cycle.');
+}
+
+function renderAgentScheduleStatus() {
+  const el = document.getElementById('scout-schedule-status');
+  if (!el) return;
+  try {
+    const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayKey = dateToKey(nowET);
+    const lastRun = localStorage.getItem('wnba_scout_last_run');
+    const hour = nowET.getHours();
+    if (lastRun === todayKey) {
+      el.innerHTML = '🟢 Daily cycle ran today (' + todayKey + '). Next: tomorrow at 9 AM ET.';
+    } else if (hour >= 9) {
+      el.innerHTML = '🟡 Daily cycle has not run yet today — will fire on the next app open (or click Run above).';
+    } else {
+      el.innerHTML = '⏱ Daily cycle scheduled for 9 AM ET today. Current ET time: ' + hour + ':' + String(nowET.getMinutes()).padStart(2,'0') + '.';
+    }
+  } catch(e) {
+    el.innerHTML = '⚪ Schedule status unavailable.';
+  }
+}
+
 function renderAgentHealth() {
   const grid = document.getElementById('agent-health');
   if (!grid) return;
@@ -6197,7 +6226,76 @@ async function init(){
       loadTodaysProps();
     }).catch(e => console.warn('Post-init prediction load failed (non-fatal):', e));
 
-    setTimeout(()=>{ runAgentCycle(false); }, 800); // SCOUT auto-runs on startup
+    // ── SCOUT DAILY SCHEDULE ──────────────────────────────────────────────
+    // SCOUT runs automatically once per day at 9 AM ET — the first time
+    // the app is opened after that time each morning. This is implemented
+    // as a localStorage-based "has today's cycle already run?" check, since
+    // GitHub Pages is a pure browser app with no server to run a real cron
+    // job. On iOS Safari (the primary environment), this fires reliably on
+    // the first app open of the day, which is practically identical to a
+    // scheduled 9 AM run.
+    //
+    // WNBA-specific additions beyond the existing maintenance cycle:
+    //   - Auto-predict today's full slate (already runs via predictAllToday)
+    //   - Auto-load today's props (already runs via loadTodaysProps)
+    //   - Auto-grade yesterday's Props History against ESPN box scores
+    //   - Auto-run the injury staleness check and escalate if stale
+    //   - Log a clear "morning briefing" summary to the agent log
+    setTimeout(() => {
+      try {
+        const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const todayKey = dateToKey(nowET); // e.g. "6/18/2026"
+        const scoutLastRun = localStorage.getItem('wnba_scout_last_run'); // "6/18/2026"
+        const scoutHour = nowET.getHours(); // 0-23 in ET
+
+        if (scoutLastRun !== todayKey && scoutHour >= 9) {
+          // First open of the day at or after 9 AM ET — fire the full cycle.
+          agentLogEntry('cycle', '🌅 Daily SCOUT cycle triggered (first open at or after 9 AM ET on ' + todayKey + ')');
+
+          // Auto-grade yesterday's Props History so the Confidence tab and
+          // Props History tab both reflect real verified results from last
+          // night's games without the person needing to manually click
+          // "Check ESPN for Results".
+          const [m, d, y] = todayKey.split('/').map(Number);
+          const yday = new Date(y, m - 1, d);
+          yday.setDate(yday.getDate() - 1);
+          const yKey = dateToKey(yday);
+          if (propsHistory[yKey]) {
+            agentLogEntry('auto', 'Auto-verifying Props History for ' + yKey + ' (yesterday\'s games)…');
+            autoVerifyHistoryDay(yKey).then(() => {
+              agentLogEntry('auto', 'Props History auto-verify complete for ' + yKey);
+            }).catch(e => agentLogEntry('escalate', 'Props History auto-verify failed for ' + yKey + ': ' + e.message));
+          } else {
+            agentLogEntry('auto', 'No Props History snapshot found for ' + yKey + ' — nothing to auto-verify');
+          }
+
+          // Auto-grade any pending My Picks from yesterday using ESPN scores.
+          autoGradeMyPicks().then(() => {
+            agentLogEntry('auto', 'My Picks auto-grade complete');
+          }).catch(e => agentLogEntry('escalate', 'My Picks auto-grade failed: ' + e.message));
+
+          // Run the full SCOUT maintenance cycle (data freshness, injury
+          // staleness, pick results, calibration, etc.)
+          runAgentCycle(false);
+
+          // Mark this date as done so the cycle doesn't fire again today.
+          localStorage.setItem('wnba_scout_last_run', todayKey);
+          agentLogEntry('cycle', '✅ Daily SCOUT cycle complete — next cycle: tomorrow at 9 AM ET');
+        } else if (scoutLastRun === todayKey) {
+          // Already ran today — just show a quiet status note in the log
+          // so the OPS AGENT tab is informative rather than empty.
+          agentLogEntry('auto', '⏱ Daily cycle already ran today (' + todayKey + '). Next cycle: tomorrow at 9 AM ET. Use "Run Full Maintenance Cycle" to trigger manually.');
+        } else {
+          // App opened before 9 AM ET today — show when it will fire.
+          agentLogEntry('auto', '⏱ Daily cycle scheduled for 9 AM ET. Current ET time: ' + scoutHour + ':' + String(nowET.getMinutes()).padStart(2,'0') + '. Open the app again after 9 AM ET to trigger it.');
+        }
+      } catch(schedErr) {
+        // Never let scheduling logic crash the whole app — SCOUT is helpful
+        // but non-critical to the dashboard's core function.
+        console.warn('SCOUT daily schedule check failed (non-fatal):', schedErr);
+        try { runAgentCycle(false); } catch(e) {} // fall back to old behavior
+      }
+    }, 1000); // slight delay so UI is fully rendered before SCOUT fires
 
     // Live roster refresh: fire-and-forget, well after the UI is already
     // shown. Uses cached data instantly if fresh (see ROSTER_CACHE_MAX_AGE_MS)
