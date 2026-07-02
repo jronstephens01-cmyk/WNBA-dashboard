@@ -641,7 +641,9 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
   </div>
   <div class="section-label">Current model confidence by category</div>
   <div class="conf-grid" id="conf-grid"></div>
-  <div class="section-label">Your pick accuracy by situation</div>
+  <div class="section-label" style="margin-top:24px">🔍 Does model confidence actually predict outcomes?</div>
+  <div id="conf-bucket-validation"></div>
+  <div class="section-label" style="margin-top:24px">Your pick accuracy by situation</div>
   <div id="situation-breakdown" class="conf-grid"></div>
   <div class="section-label" style="margin-top:24px">🗓 How often to update</div>
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;">
@@ -3982,13 +3984,40 @@ function renderConfidence(){
   // both sources now, not just the smaller manual log.
   const combinedLoggedCount = picks.length + propTotal;
 
+  // ── HONEST MODEL RELIABILITY ──
+  // Previously this label scaled purely off pick COUNT (50+ logged = "High"),
+  // which said nothing about whether picks actually won — dangerously
+  // misleading next to real accuracy numbers. Now it reflects real graded
+  // accuracy vs. the -110 breakeven threshold (~52.4%), and stays "Unproven"
+  // until there's a meaningful sample, because a hot 15-pick stretch proves
+  // nothing either direction.
+  const gradedTotal = settled.length + propTotal;         // everything with a real win/loss outcome
+  const gradedWins = wins + propWins;
+  const gradedAcc = gradedTotal ? gradedWins / gradedTotal : 0;
+  const BREAKEVEN = 0.524; // implied probability at standard -110 pricing
+  const MIN_SAMPLE = 100;
+  let reliabilityLabel, reliabilityColor;
+  if (gradedTotal < MIN_SAMPLE) {
+    reliabilityLabel = 'Unproven (' + gradedTotal + '/' + MIN_SAMPLE + ' graded)';
+    reliabilityColor = 'var(--muted)';
+  } else if (gradedAcc >= 0.55) {
+    reliabilityLabel = 'Strong (' + Math.round(gradedAcc * 100) + '% graded)';
+    reliabilityColor = 'var(--green)';
+  } else if (gradedAcc >= BREAKEVEN) {
+    reliabilityLabel = 'Marginal (' + Math.round(gradedAcc * 100) + '% graded)';
+    reliabilityColor = 'var(--gold)';
+  } else {
+    reliabilityLabel = 'No edge shown (' + Math.round(gradedAcc * 100) + '% graded)';
+    reliabilityColor = 'var(--accent)';
+  }
+
   const items=[
     {label:'Overall Win Rate',val:settled.length?Math.round(wr*100)+'%':'—',num:wr,color:'var(--green)'},
     {label:'Game Pick Accuracy',val:gamePicks.length?Math.round(gwins/gamePicks.length*100)+'%':'—',num:gamePicks.length?gwins/gamePicks.length:0,color:'var(--blue)'},
     {label:'Prop Pick Accuracy',val:propTotal?Math.round(propWins/propTotal*100)+'%':'—',num:propTotal?propWins/propTotal:0,color:'var(--purple)'},
     {label:'High Conf Props (7+)',val:highConfProps.length?Math.round(hcPropWins/highConfProps.length*100)+'%':'—',num:highConfProps.length?hcPropWins/highConfProps.length:0,color:'var(--gold)'},
     {label:'Picks Logged',val:combinedLoggedCount,num:Math.min(combinedLoggedCount/50,1),color:'var(--accent)'},
-    {label:'Model Reliability',val:combinedLoggedCount>=50?'High':combinedLoggedCount>=20?'Medium':'Building…',num:Math.min(combinedLoggedCount/50,1),color:'var(--green)'},
+    {label:'Model Reliability',val:reliabilityLabel,num:gradedTotal<MIN_SAMPLE?Math.min(gradedTotal/MIN_SAMPLE,1):gradedAcc,color:reliabilityColor},
   ];
 
   grid.innerHTML=items.map(item=>`
@@ -3997,6 +4026,64 @@ function renderConfidence(){
     <div class="conf-item-val" style="color:${item.color}">${item.val}</div>
     <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${Math.round(item.num*100)}%;background:${item.color}"></div></div>
   </div>`).join('');
+
+  // ── CONFIDENCE BUCKET VALIDATION ──
+  // The Streak Builder ranks picks by the model's own confidence score, but
+  // that score has never been checked against real outcomes. This section
+  // answers the core question directly: do conf 8-10 props actually hit more
+  // often than conf 5-7 or conf 0-4 props? If the buckets are flat (or
+  // inverted), the confidence score isn't predictive and rankings built on
+  // it shouldn't be trusted until the model is recalibrated.
+  const bucketEl = document.getElementById('conf-bucket-validation');
+  if (bucketEl) {
+    const buckets = [
+      { label: 'Conf 8–10', min: 8, max: 10 },
+      { label: 'Conf 5–7',  min: 5, max: 7.99 },
+      { label: 'Conf 0–4',  min: 0, max: 4.99 },
+    ].map(b => {
+      const inBucket = allGradedProps.filter(p => (p.conf ?? 0) >= b.min && (p.conf ?? 0) <= b.max);
+      const w = inBucket.filter(p => p.result === 'win').length;
+      return { ...b, n: inBucket.length, rate: inBucket.length ? w / inBucket.length : null };
+    });
+
+    const anyData = buckets.some(b => b.n > 0);
+    if (!anyData) {
+      bucketEl.innerHTML = '<div class="empty-state">No graded props yet — check Props History after games finish to start building this validation.</div>';
+    } else {
+      const rows = buckets.map(b => {
+        const rateStr = b.rate === null ? '—' : Math.round(b.rate * 100) + '%';
+        const smallSample = b.n > 0 && b.n < 30;
+        const rateColor = b.rate === null ? 'var(--muted)' : b.rate >= BREAKEVEN ? 'var(--green)' : 'var(--accent)';
+        return '<div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border)">' +
+          '<div style="min-width:90px;font-family:\'Barlow Condensed\',sans-serif;font-weight:700;font-size:14px;color:var(--text)">' + b.label + '</div>' +
+          '<div style="flex:1;background:var(--surface2);border-radius:4px;height:8px;overflow:hidden">' +
+            '<div style="width:' + (b.rate === null ? 0 : Math.round(b.rate * 100)) + '%;height:100%;background:' + rateColor + '"></div>' +
+          '</div>' +
+          '<div style="min-width:52px;text-align:right;font-weight:700;color:' + rateColor + '">' + rateStr + '</div>' +
+          '<div style="min-width:110px;text-align:right;font-size:11px;color:var(--muted)">' + b.n + ' graded' + (smallSample ? ' · tiny sample' : '') + '</div>' +
+        '</div>';
+      }).join('');
+
+      // Honest read of what the buckets currently show
+      const hi = buckets[0], lo = buckets[2];
+      let verdict;
+      const totalGradedProps = buckets.reduce((s, b) => s + b.n, 0);
+      if (totalGradedProps < 50) {
+        verdict = '⏳ Too early to judge — ' + totalGradedProps + ' graded props so far. This section becomes meaningful around 50+, trustworthy around 150+. Keep letting Props History auto-grade daily.';
+      } else if (hi.rate !== null && lo.rate !== null && hi.rate > lo.rate + 0.05) {
+        verdict = '✅ Confidence looks predictive so far — higher-conf props are hitting more often than low-conf ones. Streak Builder\'s ranking premise holds up on current data.';
+      } else if (hi.rate !== null && hi.rate < BREAKEVEN) {
+        verdict = '⚠️ High-confidence props are hitting below the ' + Math.round(BREAKEVEN*1000)/10 + '% breakeven rate (-110 pricing). On current data, the confidence score is not identifying profitable picks — treat Streak Builder rankings as unvalidated until this improves.';
+      } else {
+        verdict = '➖ Buckets look flat — confidence isn\'t clearly separating winners from losers yet. More data needed before trusting confidence-ranked picks with real money.';
+      }
+
+      bucketEl.innerHTML =
+        '<div class="card" style="overflow:hidden">' + rows + '</div>' +
+        '<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-top:10px">' + verdict +
+        ' <span style="color:var(--gold)">Reference: at standard -110 odds you need 52.4% to break even.</span></div>';
+    }
+  }
 
   // Situation breakdown
   const sitGrid=document.getElementById('situation-breakdown');
