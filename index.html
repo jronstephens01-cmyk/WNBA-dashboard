@@ -4065,23 +4065,55 @@ function renderConfidence(){
       }).join('');
 
       // Honest read of what the buckets currently show
-      const hi = buckets[0], lo = buckets[2];
+      // Compare the top bucket against the lowest POPULATED bucket — the
+      // model rarely surfaces conf 0-4 picks at all, so comparing against
+      // an empty bucket silently failed and mislabeled real separation
+      // (e.g. 60% vs 50% with a healthy sample) as "flat".
+      const hi = buckets[0];
+      const lo = [...buckets].reverse().find(b => b.n >= 20 && b !== hi) || null;
       let verdict;
       const totalGradedProps = buckets.reduce((s, b) => s + b.n, 0);
+      const hiPct = hi.rate !== null ? Math.round(hi.rate * 100) : null;
       if (totalGradedProps < 50) {
         verdict = '⏳ Too early to judge — ' + totalGradedProps + ' graded props so far. This section becomes meaningful around 50+, trustworthy around 150+. Keep letting Props History auto-grade daily.';
-      } else if (hi.rate !== null && lo.rate !== null && hi.rate > lo.rate + 0.05) {
-        verdict = '✅ Confidence looks predictive so far — higher-conf props are hitting more often than low-conf ones. Streak Builder\'s ranking premise holds up on current data.';
+      } else if (hi.rate !== null && lo && lo.rate !== null && hi.rate > lo.rate + 0.05 && hi.rate >= BREAKEVEN) {
+        verdict = '✅ Confidence IS predictive on current data: conf ' + hi.label.replace('Conf ','') + ' props hit ' + hiPct + '% (' + hi.n + ' graded) vs ' + Math.round(lo.rate*100) + '% for ' + lo.label.toLowerCase() + '. The actionable move: only bet the top bucket — everything below it is at or under breakeven and drags your realized rate down.';
       } else if (hi.rate !== null && hi.rate < BREAKEVEN) {
         verdict = '⚠️ High-confidence props are hitting below the ' + Math.round(BREAKEVEN*1000)/10 + '% breakeven rate (-110 pricing). On current data, the confidence score is not identifying profitable picks — treat Streak Builder rankings as unvalidated until this improves.';
       } else {
         verdict = '➖ Buckets look flat — confidence isn\'t clearly separating winners from losers yet. More data needed before trusting confidence-ranked picks with real money.';
       }
 
+      // ── Real-line vs estimate-line split ──
+      // Props graded against the model's own estimated line can't actually
+      // be bet — no book offered that number — so they inflate/deflate the
+      // headline rate with partly fictional results. Segmenting them out
+      // shows the only rate that maps to real money: real-line props.
+      const realProps = allGradedProps.filter(p => p.real);
+      const estProps = allGradedProps.filter(p => !p.real);
+      const realWins = realProps.filter(p => p.result === 'win').length;
+      const estWins = estProps.filter(p => p.result === 'win').length;
+      const bettable = realProps.filter(p => (p.conf ?? 0) >= 8);
+      const bettableWins = bettable.filter(p => p.result === 'win').length;
+      const pctOf = (w, n) => n ? Math.round(w / n * 100) + '%' : '—';
+      const lineRow = (label, w, n, highlight) =>
+        '<div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border)' + (highlight ? ';background:rgba(61,220,132,.06)' : '') + '">' +
+          '<div style="flex:1;font-size:13px;color:var(--text)' + (highlight ? ';font-weight:700' : '') + '">' + label + '</div>' +
+          '<div style="min-width:52px;text-align:right;font-weight:700;color:' + (n && w/n >= BREAKEVEN ? 'var(--green)' : n ? 'var(--accent)' : 'var(--muted)') + '">' + pctOf(w, n) + '</div>' +
+          '<div style="min-width:90px;text-align:right;font-size:11px;color:var(--muted)">' + n + ' graded</div>' +
+        '</div>';
+
       bucketEl.innerHTML =
         '<div class="card" style="overflow:hidden">' + rows + '</div>' +
         '<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-top:10px">' + verdict +
-        ' <span style="color:var(--gold)">Reference: at standard -110 odds you need 52.4% to break even.</span></div>';
+        ' <span style="color:var(--gold)">Reference: at standard -110 odds you need 52.4% to break even.</span></div>' +
+        '<div class="section-label" style="margin-top:18px;font-size:12px">Real sportsbook lines vs model-estimate lines</div>' +
+        '<div class="card" style="overflow:hidden">' +
+          lineRow('Real lines (FanDuel/DK — actually bettable)', realWins, realProps.length, false) +
+          lineRow('Model-estimate lines (no real line existed — not bettable)', estWins, estProps.length, false) +
+          lineRow('🎯 The bettable edge: conf 8+ on real lines only', bettableWins, bettable.length, true) +
+        '</div>' +
+        '<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-top:10px">Estimate-line results are partly fictional — no book offered those numbers, so they can\'t be bet and shouldn\'t drive decisions. The highlighted row is the subset that maps to real money.</div>';
     }
   }
 
