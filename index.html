@@ -804,6 +804,7 @@ body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;min-
 <!-- ══ TEAMS ══ -->
 <div class="tab-page" id="tab-teams"><div class="page">
   <div class="section-label">League standings & stats</div>
+  <div class="card" id="data-verify-banner" style="padding:14px 18px;margin-bottom:16px;border-left:3px solid var(--muted)"></div>
   <div class="card" style="padding:14px 18px;margin-bottom:16px;border-left:3px solid var(--purple);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
     <div style="flex:1;min-width:200px">
       <div style="font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:800;color:var(--text)">Player Rosters</div>
@@ -1849,6 +1850,7 @@ function formBonus(form){return(form.filter(x=>x==='W').length-2.5)*0.008;}
 // REAL DATA ENGINE — pulls live stats from ESPN's API
 // ════════════════════════════════════════════════════
 let dataSource = 'loading'; // 'live' | 'fallback'
+let dataSourceReason = ''; // human-readable reason when dataSource === 'fallback', for the Teams tab verify screen
 let lastFetchTime = null;
 
 // Master fetch: combines standings + team stats + recent results.
@@ -1864,6 +1866,7 @@ async function fetchTeamData(){
   if (result === 'TIMEOUT') {
     console.warn('Startup data fetch exceeded 10s ceiling — using fallback so the app can load.');
     dataSource = 'fallback';
+    dataSourceReason = 'ESPN data took too long to load (10s+) — the app switched to backup numbers so it could still open.';
     if (typeof agentLogEntry === 'function') {
       agentLogEntry('escalate', 'Live data fetch took too long on startup — loaded with fallback data instead');
     }
@@ -1887,6 +1890,7 @@ async function fetchTeamDataInner(){
 
     if (Object.keys(teams).length < 6) {
       dataSource = 'fallback';
+      dataSourceReason = 'ESPN standings only returned ' + Object.keys(teams).length + ' of 15 teams (needed at least 6) — using backup numbers instead.';
       return fallback();
     }
 
@@ -1907,6 +1911,7 @@ async function fetchTeamDataInner(){
   } catch(e) {
     console.warn('Data engine fell back:', e);
     dataSource = 'fallback';
+    dataSourceReason = 'ESPN data fetch failed: ' + (e.message || 'unknown error') + ' — using backup numbers instead.';
     return fallback();
   }
 }
@@ -1973,13 +1978,25 @@ async function fetchTeamStats(teams){
           if (!sr.ok) return;
           const sj = await sr.json();
           const cats = sj.results?.stats?.categories || sj.statistics?.splits?.categories || [];
+          t._liveFields = t._liveFields || {}; // tracks which fields actually came from this live fetch, for the verify screen
           for (const cat of cats) {
             for (const stat of (cat.stats || [])) {
               const nm = (stat.name || '').toLowerCase();
               const val = parseFloat(stat.value);
               if (isNaN(val)) continue;
-              if (nm.includes('pointspergame') || nm === 'avgpoints') t.ppg = t.ppg || val;
-              if (nm.includes('pace')) t.pace = val;
+              if (nm.includes('pointspergame') || nm === 'avgpoints') { if (t.ppg == null) { t.ppg = val; t._liveFields.ppg = true; } }
+              // Opponent points per game (the team's real defensive scoring allowed) was
+              // never being read here — only offensive ppg was — which meant every live-
+              // fetched team silently fell back to LEAGUE_AVG_PPG for its defensive rating
+              // in teamEfficiency(), flattening defense across every team regardless of how
+              // good or bad it actually is. ESPN's stat categories split some stats into an
+              // "opponent" variant with the same underlying name; checked defensively here
+              // since the exact category key isn't guaranteed — cat.name is checked too, not
+              // just the individual stat name, since some ESPN responses nest it that way.
+              const catNm = (cat.name || cat.displayName || '').toLowerCase();
+              const isOpponentSplit = catNm.includes('opponent') || nm.includes('opponent');
+              if (isOpponentSplit && (nm.includes('pointspergame') || nm === 'avgpoints')) { if (t.oppg == null) { t.oppg = val; t._liveFields.oppg = true; } }
+              if (nm.includes('pace')) { t.pace = val; t._liveFields.pace = true; }
               if (nm.includes('fieldgoalpct') || nm === 'fgpct') t.fgPct = val;
               if (nm.includes('threepoint') && nm.includes('pct')) t.tpPct = val;
               if (nm.includes('rebounds') && nm.includes('pergame')) t.rpg = val;
@@ -2032,11 +2049,11 @@ function makeDefaultTeam(name){
 function fallback(){
   const raw=[
     {n:'New York Liberty',w:10,l:2,ppg:88,oppg:76,pace:95},{n:'Las Vegas Aces',w:9,l:3,ppg:86,oppg:77,pace:94},
-    {n:'Seattle Storm',w:8,l:4,ppg:83,oppg:78,pace:93},{n:'Minnesota Lynx',w:7,l:5,ppg:82,oppg:79,pace:91},
+    {n:'Seattle Storm',w:8,l:4,ppg:83,oppg:78,pace:93},{n:'Minnesota Lynx',w:18,l:6,ppg:90.6,oppg:81.8,pace:91}, // real 2026 season stats confirmed via CBS Sports, Jul 15 2026 — was 82/79, off by 8.6/2.8 pts
     {n:'Indiana Fever',w:7,l:5,ppg:81,oppg:80,pace:94},{n:'Connecticut Sun',w:6,l:6,ppg:79,oppg:80,pace:90},
     {n:'Atlanta Dream',w:5,l:7,ppg:78,oppg:82,pace:92},{n:'Chicago Sky',w:5,l:7,ppg:77,oppg:83,pace:91},
     {n:'Phoenix Mercury',w:5,l:7,ppg:79,oppg:83,pace:93},{n:'Golden State Valkyries',w:5,l:7,ppg:80,oppg:81,pace:93},
-    {n:'Toronto Tempo',w:4,l:8,ppg:78,oppg:82,pace:92},{n:'Los Angeles Sparks',w:3,l:9,ppg:76,oppg:84,pace:91},
+    {n:'Toronto Tempo',w:4,l:8,ppg:78,oppg:82,pace:92},{n:'Los Angeles Sparks',w:10,l:12,ppg:90.2,oppg:93.3,pace:91}, // real 2026 stats confirmed via lastwordonsports preview, Jul 15 2026 — was 76/84, off by 14.2/9.3 pts
     {n:'Dallas Wings',w:3,l:9,ppg:75,oppg:85,pace:92},{n:'Washington Mystics',w:2,l:10,ppg:74,oppg:87,pace:90},
     {n:'Portland Fire',w:4,l:8,ppg:77,oppg:82,pace:92},
   ];
@@ -4365,7 +4382,26 @@ function addPlayer(team){
 }
 
 // ════ TEAM STATS ════
+function renderDataVerifyBanner() {
+  const el = document.getElementById('data-verify-banner');
+  if (!el) return;
+  if (dataSource === 'live') {
+    const fetchedAgo = lastFetchTime ? Math.round((Date.now() - lastFetchTime.getTime()) / 60000) : null;
+    el.style.borderLeftColor = 'var(--green)';
+    el.innerHTML = '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:13px;font-weight:800;color:var(--green)">🟢 Live ESPN Data</div>' +
+      '<div style="font-size:12px;color:var(--muted);margin-top:4px">Team PPG/opponent PPG/records pulled directly from ESPN' +
+      (fetchedAgo != null ? ' — last fetched ' + (fetchedAgo < 1 ? 'just now' : fetchedAgo + ' min ago') : '') +
+      '. Each team card below shows PPG/OPP; if a number looks wrong, that\'s worth double-checking against a real box score.</div>';
+  } else {
+    el.style.borderLeftColor = 'var(--accent)';
+    el.innerHTML = '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:13px;font-weight:800;color:var(--accent)">🟡 Using Backup Numbers, Not Live ESPN Data</div>' +
+      '<div style="font-size:12px;color:var(--muted);margin-top:4px">' + (dataSourceReason || 'Live ESPN data did not load for an unknown reason.') +
+      ' Every prediction right now is using the built-in baseline stats below, which can be significantly stale for teams that haven\'t been manually updated. Try reloading the app, or check your connection.</div>';
+  }
+}
+
 function renderTeamStats(){
+  renderDataVerifyBanner();
   const grid=document.getElementById('team-stats-grid');
   const sorted=Object.values(teamData).sort((a,b)=>b.winPct-a.winPct);
   grid.innerHTML=sorted.map((t,rank)=>{
@@ -4389,8 +4425,8 @@ function renderTeamStats(){
       </div>
       <div class="team-stat-body">
         <div class="stat-item"><span class="val">${t.wins}-${t.losses}</span><span class="lbl">Record</span></div>
-        <div class="stat-item"><span class="val">${t.ppg.toFixed(1)}</span><span class="lbl">PPG</span></div>
-        <div class="stat-item"><span class="val">${t.oppg.toFixed(1)}</span><span class="lbl">OPP</span></div>
+        <div class="stat-item"><span class="val">${t.ppg.toFixed(1)}</span><span class="lbl">PPG${dataSource==='fallback'?' <span style="color:var(--accent)">●</span>':''}</span></div>
+        <div class="stat-item"><span class="val">${t.oppg.toFixed(1)}</span><span class="lbl">OPP${dataSource==='fallback'?' <span style="color:var(--accent)">●</span>':''}</span></div>
         <div class="stat-item" style="grid-column:1/-1"><span class="lbl">Last 5</span><div class="form-dots">${dots}</div></div>
         ${injCount?`<div class="stat-item" style="grid-column:1/-1"><span class="lbl" style="color:var(--accent)">⚠ ${injCount} concern${injCount>1?'s':''}</span></div>`:''}
         ${rosterHtml}
@@ -6453,6 +6489,7 @@ async function init(){
     console.error('init() failed:', fatalErr);
     teamData = (typeof teamData === 'object' && Object.keys(teamData||{}).length) ? teamData : fallback();
     dataSource = 'fallback';
+    dataSourceReason = 'App startup hit an unexpected error: ' + (fatalErr.message || 'unknown') + ' — using backup numbers instead.';
     const loadingEl = document.getElementById('loading');
     const mainEl = document.getElementById('main-content');
     if (loadingEl) loadingEl.style.display = 'none';
