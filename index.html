@@ -1458,16 +1458,17 @@ function parseGamelogRows(data){
       const isHome = g.isHome ?? g.atHome ?? (g.homeAway === 'home') ?? null;
       // Stats can show up as a flat object {PTS:18, REB:6,...} or as an
       // array of {label, value} pairs depending on which ESPN shape this is.
-      let pts=null, reb=null, ast=null;
+      let pts=null, reb=null, ast=null, min=null;
       if (g.stats && typeof g.stats === 'object' && !Array.isArray(g.stats)) {
         pts = g.stats.PTS ?? g.stats.pts ?? null;
         reb = g.stats.REB ?? g.stats.reb ?? null;
         ast = g.stats.AST ?? g.stats.ast ?? null;
+        min = g.stats.MIN ?? g.stats.min ?? g.stats.minutes ?? null;
       } else if (Array.isArray(g.stats)) {
         const find = (label) => { const f = g.stats.find(s=>s && (s.label===label || s.name===label)); return f ? Number(f.value ?? f.displayValue) : null; };
-        pts = find('PTS'); reb = find('REB'); ast = find('AST');
+        pts = find('PTS'); reb = find('REB'); ast = find('AST'); min = find('MIN');
       }
-      if (dateStr && pts != null) rows.push({ date: dateStr, isHome, pts, reb: reb ?? 0, ast: ast ?? 0 });
+      if (dateStr && pts != null) rows.push({ date: dateStr, isHome, pts, reb: reb ?? 0, ast: ast ?? 0, min: min ?? null });
     }
     return rows.length ? rows : null;
   };
@@ -1515,10 +1516,26 @@ async function fetchPlayerFormSignals(athleteId){
     const lastGameDate = new Date(rows[rows.length-1].date);
     const daysRest = Math.round((Date.now() - lastGameDate.getTime()) / (1000*60*60*24));
 
+    // Real minutes played — a background signal, not a UI feature. A
+    // player's per-game rate stats (ppg/rpg/apg) mean much less if their
+    // actual floor time is swinging game to game; a sudden drop can reflect
+    // foul trouble, a coaching decision, or a minor issue not yet reflected
+    // in the injury report. avgMinutes is the last-5 baseline; minutesTrend
+    // compares the most recent 2 games against that baseline so a real,
+    // recent shift (not just noise) can nudge the projection.
+    const minRows = recent.filter(r => r.min != null && !isNaN(r.min));
+    const avgMinutes = minRows.length ? avg(minRows, 'min') : null;
+    const last2 = minRows.slice(-2);
+    const last2AvgMin = last2.length ? avg(last2, 'min') : null;
+    const minutesTrend = (avgMinutes != null && last2AvgMin != null && avgMinutes > 0)
+      ? +((last2AvgMin - avgMinutes) / avgMinutes).toFixed(3) // e.g. -0.15 = playing 15% fewer minutes lately
+      : null;
+
     return {
       recentPts: avg(recent, 'pts'), recentReb: avg(recent, 'reb'), recentAst: avg(recent, 'ast'),
       homePts: avg(homeGames, 'pts'), awayPts: avg(awayGames, 'pts'),
       gamesConsidered: recent.length, daysRest,
+      avgMinutes, minutesTrend, minutesSampleSize: minRows.length,
     };
   } catch (e) {
     return null; // network failure, timeout, or bad shape — caller falls back
@@ -2313,10 +2330,27 @@ function computePlayerProps(player, team, opp, isHomeGame) {
   const status = injEntry ? injEntry.status : 'Healthy';
   const injMult = injEntry ? 1 - IMPACT_MAP[status] : 1;
 
+  // Background minutes signal — not shown in the UI, just quietly sharpens
+  // the projection. A player's per-game rate stats (ppg/rpg/apg) assume
+  // roughly their season-average floor time; if their last couple games
+  // show a real, meaningful shift in minutes (foul trouble, a coaching
+  // change, role change, a minor issue not yet reflected in the injury
+  // report), that should nudge pts/reb/ast in the same direction, since
+  // all three scale roughly linearly with playing time. Deliberately
+  // conservative: half-weighted and capped at ±12%, since a 2-game vs.
+  // 5-game minutes comparison is a noisy signal on its own — this softens
+  // it rather than lets it swing the projection on its own.
+  const formSignals = playerFormCache[player.athleteId];
+  let minutesMult = 1;
+  if (formSignals && formSignals.minutesTrend != null && formSignals.minutesSampleSize >= 3) {
+    const dampened = formSignals.minutesTrend * 0.5; // half-weight the raw trend
+    minutesMult = 1 + Math.max(-0.12, Math.min(0.12, dampened)); // cap at ±12%
+  }
+
   // Our model's projection (deterministic — stable per render)
-  const projPts = +(player.ppg * defFactor * injMult).toFixed(1);
-  const projReb = +(player.rpg * injMult).toFixed(1);
-  const projAst = +(player.apg * injMult).toFixed(1);
+  const projPts = +(player.ppg * defFactor * injMult * minutesMult).toFixed(1);
+  const projReb = +(player.rpg * injMult * minutesMult).toFixed(1);
+  const projAst = +(player.apg * injMult * minutesMult).toFixed(1);
 
   // Use REAL sportsbook line if connected, else a sharpened free-data
   // estimate (recent form + home/away + rest days) when we have it
