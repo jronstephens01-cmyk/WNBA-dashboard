@@ -5804,6 +5804,7 @@ async function importRealBacktestHistory() {
             predWinner: pred.winner, predMargin: pred.factors.spread,
             predWinProb: pred.winProb, aiRating: pred.aiRating,
             espnEventId: ev.id || null, // dedupe key for future imports
+            predDataSource: dataSource, // 'live' or 'fallback' — was this prediction made with real team stats or backup numbers? SCOUT checks this before trusting a bias calculation.
           });
           if (ev.id) existingIds.add(ev.id);
           imported++;
@@ -5962,27 +5963,41 @@ function renderBacktest() {
   // ── Auto-tune suggestion ──
   const tuneCard = document.getElementById('bt-tune-card');
   const tune = document.getElementById('bt-tune');
-  if (n >= 10) {
+  // Only trust games predicted while running on live ESPN data — a bias
+  // computed from fallback/stale-data predictions isn't real home-court
+  // bias, it's the error from wrong team inputs getting misattributed to
+  // the home-court constant, which would push this suggestion the wrong way.
+  const liveGames = backtestGames.filter(g => g.predDataSource === 'live');
+  const staleGames = backtestGames.length - liveGames.length;
+  if (liveGames.length >= 10) {
     // Check home/away bias: does the model over- or under-predict home teams?
     let homeBias = 0;
-    for (const g of backtestGames) {
+    for (const g of liveGames) {
       const predHomeMargin = g.predHome - g.predAway;
       const actHomeMargin = g.homeScore - g.awayScore;
       homeBias += (actHomeMargin - predHomeMargin);
     }
-    homeBias = homeBias / n;
+    homeBias = homeBias / liveGames.length;
     tuneCard.style.display = 'block';
     const tuneBtn = document.getElementById('bt-tune-btn');
+    const staleNote = staleGames > 0 ? ' (' + staleGames + ' other game' + (staleGames!==1?'s excluded':' excluded') + ' — predicted on backup data, not live ESPN stats.)' : '';
     if (Math.abs(homeBias) > 1.5) {
       const dir = homeBias > 0 ? 'under-rating home teams' : 'over-rating home teams';
       const adj = homeBias > 0 ? 'increase' : 'decrease';
       window._suggestedHomeEdge = +(modelTuning.homeEdge + homeBias * 0.5).toFixed(1);
-      tune.innerHTML = 'The model is <strong>' + dir + '</strong> by about <strong>' + Math.abs(homeBias).toFixed(1) + ' pts</strong> on average. Suggested fix: ' + adj + ' the home-court adjustment from <strong>' + modelTuning.homeEdge + '</strong> to <strong>' + window._suggestedHomeEdge + '</strong> points.';
+      tune.innerHTML = 'The model is <strong>' + dir + '</strong> by about <strong>' + Math.abs(homeBias).toFixed(1) + ' pts</strong> on average, based on <strong>' + liveGames.length + ' games predicted with live ESPN data</strong>.' + staleNote + ' Suggested fix: ' + adj + ' the home-court adjustment from <strong>' + modelTuning.homeEdge + '</strong> to <strong>' + window._suggestedHomeEdge + '</strong> points.';
       tuneBtn.style.display = 'inline-block';
     } else {
-      tune.innerHTML = '✅ The model\'s home/away balance looks well-calibrated (bias under 1.5 pts). No adjustment needed right now. Keep logging games and re-check.';
+      tune.innerHTML = '✅ The model\'s home/away balance looks well-calibrated (bias under 1.5 pts, ' + liveGames.length + ' live-data games checked).' + staleNote + ' No adjustment needed right now. Keep logging games and re-check.';
       tuneBtn.style.display = 'none';
     }
+  } else if (n >= 10) {
+    // Enough games logged overall, but not enough were predicted on live
+    // data to trust a tuning suggestion — say so plainly instead of
+    // silently computing a bias from stale-data predictions.
+    tuneCard.style.display = 'block';
+    document.getElementById('bt-tune-btn').style.display = 'none';
+    tune.innerHTML = '⏳ ' + liveGames.length + ' of ' + n + ' back-tested games were predicted while live ESPN data was loaded — need at least 10 live-data games before SCOUT can trust a tuning suggestion. ' + staleGames + ' game' + (staleGames!==1?'s were':' was') + ' predicted on backup numbers and can\'t be used for this. Re-import once you\'ve confirmed live data is loading (check the Teams tab banner).';
   } else {
     tuneCard.style.display = 'none';
   }
@@ -6116,24 +6131,37 @@ async function runAgentCycle(manual) {
     auto.push({ icon:'🔬', task:'Back-test calibration run', result:acc.toFixed(0) + '% accuracy over ' + backtestGames.length + ' games' });
     agentLogEntry('auto', 'Calibration: ' + acc.toFixed(0) + '% winner accuracy (' + backtestGames.length + ' games)');
 
-    // Check for home bias to escalate as a tuning suggestion
-    let homeBias = 0;
-    for (const g of backtestGames) {
-      homeBias += ((g.homeScore - g.awayScore) - (g.predHome - g.predAway));
-    }
-    homeBias = homeBias / backtestGames.length;
-    if (Math.abs(homeBias) > 1.5) {
-      const suggested = +(modelTuning.homeEdge + homeBias * 0.5).toFixed(1);
-      agentApprovals.push({
-        id:'tune-home', icon:'⚙️', pri:'high',
-        title:'Model tuning suggested',
-        body:'Back-test shows the model is ' + (homeBias>0?'under':'over') + '-rating home teams by ' + Math.abs(homeBias).toFixed(1) + ' pts. SCOUT recommends adjusting home-court from ' + modelTuning.homeEdge + ' to ' + suggested + ' points. This changes all future predictions, so it needs your sign-off.',
-        actionLabel:'Apply Tuning (' + modelTuning.homeEdge + ' → ' + suggested + ')',
-        action:"modelTuning.homeEdge=" + suggested + ";localStorage.setItem('wnba_tuning',JSON.stringify(modelTuning));agentLogEntry('approved','Overseer approved home-edge tuning → " + suggested + "');showAppAlert('✓ Applied. Re-run predictions to see the effect.');runAgentCycle(true);"
-      });
-      agentLogEntry('escalate', 'Home-bias tuning (' + homeBias.toFixed(1) + 'pt) — escalated for approval');
-    } else if (acc >= 60) {
-      auto.push({ icon:'✓', task:'Model bias check', result:'well-calibrated' });
+    // Only trust back-test games whose prediction was actually made using
+    // live ESPN team stats — a bias computed from fallback/stale-data
+    // predictions isn't real home-court bias, it's the error from wrong
+    // team inputs getting misattributed to the home-court constant, which
+    // would push this suggestion in the wrong direction.
+    const liveBacktestGames = backtestGames.filter(g => g.predDataSource === 'live');
+    const staleBacktestGames = backtestGames.length - liveBacktestGames.length;
+
+    if (liveBacktestGames.length < 10) {
+      auto.push({ icon:'⚠', task:'Tuning check skipped', result: liveBacktestGames.length + '/' + backtestGames.length + ' games have live data — need 10+ to trust a bias calculation' });
+      agentLogEntry('auto', 'Skipped tuning suggestion — only ' + liveBacktestGames.length + ' back-tested games were predicted on live data (need 10+). ' + staleBacktestGames + ' were predicted while running on backup numbers and can\'t be trusted for this.');
+    } else {
+      let homeBias = 0;
+      for (const g of liveBacktestGames) {
+        homeBias += ((g.homeScore - g.awayScore) - (g.predHome - g.predAway));
+      }
+      homeBias = homeBias / liveBacktestGames.length;
+      const staleNote = staleBacktestGames > 0 ? ' (' + staleBacktestGames + ' other back-tested game' + (staleBacktestGames!==1?'s were':' was') + ' excluded — predicted on backup data, not live.)' : '';
+      if (Math.abs(homeBias) > 1.5) {
+        const suggested = +(modelTuning.homeEdge + homeBias * 0.5).toFixed(1);
+        agentApprovals.push({
+          id:'tune-home', icon:'⚙️', pri:'high',
+          title:'Model tuning suggested',
+          body:'Back-test shows the model is ' + (homeBias>0?'under':'over') + '-rating home teams by ' + Math.abs(homeBias).toFixed(1) + ' pts, based on ' + liveBacktestGames.length + ' games predicted with live ESPN data.' + staleNote + ' SCOUT recommends adjusting home-court from ' + modelTuning.homeEdge + ' to ' + suggested + ' points. This changes all future predictions, so it needs your sign-off.',
+          actionLabel:'Apply Tuning (' + modelTuning.homeEdge + ' → ' + suggested + ')',
+          action:"modelTuning.homeEdge=" + suggested + ";localStorage.setItem('wnba_tuning',JSON.stringify(modelTuning));agentLogEntry('approved','Overseer approved home-edge tuning → " + suggested + "');showAppAlert('✓ Applied. Re-run predictions to see the effect.');runAgentCycle(true);"
+        });
+        agentLogEntry('escalate', 'Home-bias tuning (' + homeBias.toFixed(1) + 'pt, ' + liveBacktestGames.length + ' live-data games) — escalated for approval');
+      } else if (acc >= 60) {
+        auto.push({ icon:'✓', task:'Model bias check', result:'well-calibrated' });
+      }
     }
   } else {
     const have = (typeof backtestGames !== 'undefined') ? backtestGames.length : 0;
