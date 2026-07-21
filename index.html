@@ -4538,6 +4538,40 @@ function renderCard(p){
           ? (apiReal.book === 'fanduel' ? 'FanDuel' : apiReal.book === 'draftkings' ? 'DraftKings' : (apiReal.book || 'Live'))
           : 'Model estimate — no real line yet';
       const totColor = totReal ? 'var(--green)' : 'var(--muted)';
+
+      // ── Model lean on the total ──
+      // Same discipline the props data validated: state a clear lean only
+      // when there's a real line AND a real edge (3+ pts on a game total);
+      // say PASS explicitly when it's too close; and when no real line
+      // exists, say to wait rather than pretend an estimate is bettable.
+      const totEdge = +(projTotal - totLine).toFixed(1);
+      let leanHtml;
+      if (totReal && Math.abs(totEdge) >= 3) {
+        const side = totEdge > 0 ? 'OVER' : 'UNDER';
+        leanHtml = '<span style="color:var(--green);font-weight:700">🎯 Model suggests: ' + side + ' ' + totLine + '</span>' +
+          '<span style="color:var(--muted)"> — projects ' + projTotal + ' (' + (totEdge>0?'+':'') + totEdge + ' vs the line)</span>';
+      } else if (totReal) {
+        leanHtml = '<span style="color:var(--muted)">➖ PASS on the total — projection ' + projTotal + ' is within 3 pts of the line (' + (totEdge>0?'+':'') + totEdge + '). No real edge either way.</span>';
+      } else {
+        leanHtml = '<span style="color:var(--muted)">Model projects ' + projTotal + ' — no real total posted yet, wait for a line before betting this.</span>';
+      }
+
+      // ── Quarter angle ──
+      // Uses the model's own quarter distribution for THIS prediction to
+      // name the hottest and coldest projected quarters, with estimated
+      // quarter lines derived by splitting the REAL game line in the same
+      // proportions. Only shown when a real game line exists — an estimated
+      // share of an estimated line would be fiction stacked on fiction.
+      let quarterHtml = '';
+      if (totReal && Array.isArray(p.awayQtrs) && Array.isArray(p.homeQtrs) && p.awayQtrs.length === 4) {
+        const qCombined = p.awayQtrs.map((q,i) => q + p.homeQtrs[i]);
+        const qProjSum = qCombined.reduce((a,b)=>a+b,0) || 1;
+        const estQLines = qCombined.map(q => +(totLine * (q / qProjSum)).toFixed(1));
+        let hi = 0, lo = 0;
+        qCombined.forEach((q,i) => { if (q > qCombined[hi]) hi = i; if (q < qCombined[lo]) lo = i; });
+        quarterHtml = '<div style="font-size:11px;color:var(--muted);margin-top:5px">Quarter angle: <span style="color:var(--gold)">Q' + (hi+1) + ' projects hottest</span> (est. quarter line ~' + estQLines[hi] + ') — the Over spot if betting a quarter · Q' + (lo+1) + ' slowest (~' + estQLines[lo] + ') — the Under spot. Quarter lines are estimates from splitting the real game line; confirm at your book.</div>';
+      }
+
       return `
     <div class="vegas-line-box" style="margin-top:8px">
       <span class="vl-label">Total ${totReal ? '●' : ''}</span>
@@ -4547,7 +4581,8 @@ function renderCard(p){
         <button class="btn btn-green" style="font-size:11px;padding:6px 12px" onclick="saveTotalPick('${p.id}','OVER',${totLine},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}',${p.aiRating})">✅ Over ${totLine}</button>
         <button class="btn btn-surface" style="font-size:11px;padding:6px 12px" onclick="saveTotalPick('${p.id}','UNDER',${totLine},'${p.awayTeam}','${p.homeTeam}','${p.scheduleDate||''}',${p.aiRating})">✅ Under ${totLine}</button>
       </div>
-    </div>`;
+    </div>
+    <div style="font-size:11px;margin-top:6px;padding:0 4px">${leanHtml}${quarterHtml}</div>`;
     })()}
   </div>
   <div class="quarters-section">
